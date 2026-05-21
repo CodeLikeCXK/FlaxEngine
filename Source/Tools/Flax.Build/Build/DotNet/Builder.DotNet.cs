@@ -135,27 +135,7 @@ namespace Flax.Build
             // Deploy files
             if (!target.IsPreBuilt)
             {
-                using (new ProfileEventScope("DeployFiles"))
-                {
-                    foreach (var srcFile in targetBuildOptions.OptionalDependencyFiles.Where(File.Exists).Union(targetBuildOptions.DependencyFiles))
-                    {
-                        var dstFile = Path.Combine(outputPath, Path.GetFileName(srcFile));
-                        graph.AddCopyFile(dstFile, srcFile);
-                    }
-
-                    if (targetBuildOptions.NugetPackageReferences.Any())
-                    {
-                        var nugetPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
-                        foreach (var reference in targetBuildOptions.NugetPackageReferences)
-                        {
-                            var path = Path.Combine(nugetPath, reference.Name, reference.Version, "lib", reference.Framework, $"{reference.Name}.dll");
-                            if (!File.Exists(path))
-                                Utilities.RestoreNugetPackages(graph, target);
-                            var dstFile = Path.Combine(outputPath, Path.GetFileName(path));
-                            graph.AddCopyFile(dstFile, path);
-                        }
-                    }
-                }
+                DeployFiles(graph, target, targetBuildOptions, outputPath);
             }
 
             using (new ProfileEventScope("PostBuild"))
@@ -265,6 +245,8 @@ namespace Flax.Build
             args.Add(string.Format("/nullable:{0}", buildOptions.ScriptingAPI.CSharpNullableReferences.ToString().ToLowerInvariant()));
             if (buildOptions.ScriptingAPI.CSharpNullableReferences == CSharpNullableReferences.Disable)
                 args.Add("-nowarn:8632"); // The annotation for nullable reference types should only be used in code within a '#nullable' annotations context.
+            if (buildOptions.Configuration != TargetConfiguration.Release)
+                args.Add("-nowarn:1701"); // Assuming assembly reference 'XXX, Version=8.0.0.0' used by 'Y' matches identity 'X, Version=9.0.0.0' of 'X', you may need to supply runtime policy
 #else
             args.Add("/langversion:7.3");
 #endif
@@ -301,10 +283,18 @@ namespace Flax.Build
             // Reference Nuget package
             if (buildData.TargetOptions.NugetPackageReferences.Any())
             {
-                var nugetPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+                var nugetPath = Utilities.GetNugetPackagesPath();
+                var restoreOnce = true;
                 foreach (var reference in buildOptions.NugetPackageReferences)
                 {
-                    var path = Path.Combine(nugetPath, reference.Name, reference.Version, "lib", reference.Framework, $"{reference.Name}.dll");
+                    var path = reference.GetLibPath(nugetPath);
+                    if (!File.Exists(path) && restoreOnce)
+                    {
+                        // Package binaries folder is missing so restore packages (incl. dependency packages)
+                        RestoreNugetPackages(graph, buildOptions.Target, buildOptions);
+                        restoreOnce = false;
+                        path = reference.GetLibPath(nugetPath);
+                    }
                     args.Add(string.Format("/reference:\"{0}\"", path));
                 }
             }

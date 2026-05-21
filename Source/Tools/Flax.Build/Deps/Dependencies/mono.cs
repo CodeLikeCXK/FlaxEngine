@@ -53,6 +53,48 @@ namespace Flax.Deps.Dependencies
             }
         }
 
+        /// <inheritdoc />
+        public override TargetArchitecture[] Architectures
+        {
+            get
+            {
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Windows:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.Linux:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        //TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.Mac:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.XboxOne:
+                case TargetPlatform.XboxScarlett:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                    };
+                case TargetPlatform.Switch:
+                case TargetPlatform.Android:
+                    return new[]
+                    {
+                        TargetArchitecture.ARM64,
+                    };
+                default: return new TargetArchitecture[0];
+                }
+            }
+        }
+
         private string root;
         private string monoPropsPath;
         private string monoPreprocesorDefines;
@@ -549,8 +591,8 @@ namespace Flax.Deps.Dependencies
                 {
                     var envVars = new Dictionary<string, string>
                     {
-                        { "CC", "clang-" + Configuration.LinuxClangMinVer },
-                        { "CXX", "clang++-" + Configuration.LinuxClangMinVer }
+                        { "CC", "clang-" + LinuxConfiguration.ClangMinVer },
+                        { "CXX", "clang++-" + LinuxConfiguration.ClangMinVer }
                     };
                     var monoOptions = new[]
                     {
@@ -620,7 +662,7 @@ namespace Flax.Deps.Dependencies
                 {
                     var sdk = AndroidSdk.Instance.RootPath;
                     var ndk = AndroidNdk.Instance.RootPath;
-                    var apiLevel = Configuration.AndroidPlatformApi.ToString();
+                    var apiLevel = AndroidConfiguration.PlatformApi.ToString();
                     var archName = UnixToolchain.GetToolchainName(platform, TargetArchitecture.ARM64);
                     var toolchainRoot = Path.Combine(ndk, "toolchains", "llvm", "prebuilt", AndroidSdk.GetHostName());
                     var ndkBin = Path.Combine(toolchainRoot, "bin");
@@ -737,7 +779,7 @@ namespace Flax.Deps.Dependencies
                 }
                 case TargetPlatform.Mac:
                 {
-                    var compilerFlags = string.Format("-mmacosx-version-min={0}", Configuration.MacOSXMinVer);
+                    var compilerFlags = string.Format("-mmacosx-version-min={0}", MacConfiguration.MacOSXMinVer);
                     var envVars = new Dictionary<string, string>
                     {
                         { "CFLAGS", compilerFlags },

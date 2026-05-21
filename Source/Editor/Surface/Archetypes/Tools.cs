@@ -453,7 +453,7 @@ namespace FlaxEditor.Surface.Archetypes
             }
         }
 
-        private class CurveNode<T> : SurfaceNode where T : struct
+        private class CurveNode<T> : ResizableSurfaceNode where T : struct
         {
             private BezierCurveEditor<T> _curve;
             private bool _isSavingCurve;
@@ -485,12 +485,14 @@ namespace FlaxEditor.Surface.Archetypes
                         zero, // Tangent In
                         zero, // Tangent Out
 
-                        // Empty keys zero-6
+                        // Empty keys 0-6
                         0.0f, zero, zero, zero,
                         0.0f, zero, zero, zero,
                         0.0f, zero, zero, zero,
                         0.0f, zero, zero, zero,
                         0.0f, zero, zero, zero,
+
+                        new Float2(400, 180),
                     },
                     Elements = new[]
                     {
@@ -504,28 +506,49 @@ namespace FlaxEditor.Surface.Archetypes
             public CurveNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
             : base(id, context, nodeArch, groupArch)
             {
+                _sizeValueIndex = 29; // Index of the Size stored in Values array
             }
-
+                
             /// <inheritdoc />
             public override void OnLoaded(SurfaceNodeActions action)
             {
                 base.OnLoaded(action);
 
-                var upperLeft = GetBox(0).BottomLeft;
-                var upperRight = GetBox(1).BottomRight;
-                float curveMargin = 20.0f;
-
+                // Create curve editor
+                var upperLeft = GetBox(0).BottomRight;
+                var upperRight = GetBox(1).BottomLeft;
                 _curve = new BezierCurveEditor<T>
                 {
                     MaxKeyframes = 7,
-                    Bounds = new Rectangle(upperLeft + new Float2(curveMargin, 10.0f), upperRight.X - upperLeft.X - curveMargin * 2.0f, 140.0f),
-                    Parent = this
+                    Bounds = new Rectangle(upperLeft + new Float2(0f, 10.0f), upperRight.X - upperLeft.X - 8.0f, 135.0f),
+                    Parent = this,
+                    AnchorMax = Float2.One,
                 };
                 _curve.Edited += OnCurveEdited;
                 _curve.UnlockChildrenRecursive();
                 _curve.PerformLayout();
 
+                // Sync keyframes
                 UpdateCurveKeyframes();
+            }
+
+            /// <inheritdoc />
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
+            {
+                base.OnSurfaceLoaded(action);
+
+                // Ensure the whole curve is shown
+                _curve.ShowWholeCurve();
+            }
+
+            public override void OnValuesChanged()
+            {
+                base.OnValuesChanged();
+
+                if (!_isSavingCurve)
+                {
+                    UpdateCurveKeyframes();
+                }
             }
 
             private void OnCurveEdited()
@@ -551,17 +574,6 @@ namespace FlaxEditor.Surface.Archetypes
                 SetValues(values);
 
                 _isSavingCurve = false;
-            }
-
-            /// <inheritdoc />
-            public override void OnValuesChanged()
-            {
-                base.OnValuesChanged();
-
-                if (!_isSavingCurve)
-                {
-                    UpdateCurveKeyframes();
-                }
             }
 
             private void UpdateCurveKeyframes()
@@ -828,7 +840,7 @@ namespace FlaxEditor.Surface.Archetypes
                 _picker = new TypePickerControl
                 {
                     Type = ScriptType.FlaxObject,
-                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize, 160, 16),
+                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight, 160, 16),
                     Parent = this,
                 };
                 _picker.ValueChanged += () => SetValue(0, _picker.ValueTypeName);
@@ -897,7 +909,7 @@ namespace FlaxEditor.Surface.Archetypes
                 _picker = new TypePickerControl
                 {
                     Type = ScriptType.Object,
-                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize, 140, 16),
+                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight, 140, 16),
                     Parent = this,
                 };
                 _picker.ValueChanged += () => SetValue(0, _picker.ValueTypeName);
@@ -948,7 +960,7 @@ namespace FlaxEditor.Surface.Archetypes
                 _picker = new TypePickerControl
                 {
                     Type = ScriptType.FlaxObject,
-                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize, 160, 16),
+                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight, 160, 16),
                     Parent = this,
                 };
                 _picker.ValueChanged += () => SetValue(0, _picker.ValueTypeName);
@@ -999,7 +1011,7 @@ namespace FlaxEditor.Surface.Archetypes
                 _picker = new TypePickerControl
                 {
                     Type = type,
-                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize, 160, 16),
+                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight, 160, 16),
                     Parent = this,
                 };
                 _picker.ValueChanged += () => SetValue(0, _picker.ValueTypeName);
@@ -1058,7 +1070,11 @@ namespace FlaxEditor.Surface.Archetypes
 
         internal class RerouteNode : SurfaceNode, IConnectionInstigator
         {
-            internal static readonly Float2 DefaultSize = new Float2(FlaxEditor.Surface.Constants.BoxSize);
+            internal static readonly Float2 DefaultSize = new Float2(FlaxEditor.Surface.Constants.BoxRowHeight);
+            
+            internal bool DrawDisabled => _input.AllConnectionsDisabled || _output.AllConnectionsDisabled;
+            internal override bool DrawBasicShadow => false;
+
             private Rectangle _localBounds;
             private InputBox _input;
             private OutputBox _output;
@@ -1162,8 +1178,17 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
+            public override void Resize(float width, float height)
+            {
+                // Do nothing so the input and output boxes do not change position
+            }
+
+            /// <inheritdoc />
             public override void Draw()
             {
+                // Update active state of input
+                _input.IsActive = !_output.AllConnectionsDisabled;
+
                 var style = Surface.Style;
                 var connectionColor = style.Colors.Default;
                 var type = ScriptType.Null;
@@ -1177,6 +1202,10 @@ namespace FlaxEditor.Surface.Archetypes
                     Surface.Style.GetConnectionColor(type, hints, out connectionColor);
                 }
 
+                // Draw the box as disabled if needed
+                if (DrawDisabled)
+                    connectionColor = connectionColor * 0.6f;
+
                 if (!_input.HasAnyConnection)
                     Render2D.FillRectangle(new Rectangle(-barHorizontalOffset - barHeight * 2, (DefaultSize.Y - barHeight) / 2, barHeight * 2, barHeight), connectionColor);
                 if (!_output.HasAnyConnection)
@@ -1187,6 +1216,11 @@ namespace FlaxEditor.Surface.Archetypes
                     icon = type.IsVoid ? style.Icons.ArrowClose : style.Icons.BoxClose;
                 else
                     icon = type.IsVoid ? style.Icons.ArrowOpen : style.Icons.BoxOpen;
+
+                // Shadow
+                var shadowRect = _localBounds.MakeOffsetted(ShadowOffset);
+                Render2D.DrawSprite(icon, shadowRect, Color.Black.AlphaMultiplied(0.125f));
+
                 Render2D.DrawSprite(icon, _localBounds, connectionColor);
 
                 base.Draw();
@@ -1431,8 +1465,8 @@ namespace FlaxEditor.Surface.Archetypes
                 TypeID = 6,
                 Title = "Panner",
                 Description = "Animates UVs over time",
-                Flags = NodeFlags.MaterialGraph,
-                Size = new Float2(170, 80),
+                Flags = NodeFlags.MaterialGraph | NodeFlags.FixedSize,
+                Size = new Float2(170, 96),
                 DefaultValues = new object[]
                 {
                     false
@@ -1442,7 +1476,7 @@ namespace FlaxEditor.Surface.Archetypes
                     NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
                     NodeElementArchetype.Factory.Input(1, "Time", true, typeof(float), 1),
                     NodeElementArchetype.Factory.Input(2, "Speed", true, typeof(Float2), 2),
-                    NodeElementArchetype.Factory.Text(18, Surface.Constants.LayoutOffsetY * 3 + 5, "Fractional Part"),
+                    NodeElementArchetype.Factory.Text(20, Surface.Constants.LayoutOffsetY * 3 + 5, "Fractional Part"),
                     NodeElementArchetype.Factory.Bool(0, Surface.Constants.LayoutOffsetY * 3 + 5, 0),
                     NodeElementArchetype.Factory.Output(0, "", typeof(Float2), 3)
                 }
@@ -1492,7 +1526,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Color Gradient",
                 Create = (id, context, arch, groupArch) => new ColorGradientNode(id, context, arch, groupArch),
                 Description = "Linear color gradient sampler",
-                Flags = NodeFlags.AllGraphs,
+                Flags = NodeFlags.AllGraphs | NodeFlags.FixedSize,
                 Size = new Float2(400, 150.0f),
                 DefaultValues = new object[]
                 {
@@ -1575,7 +1609,7 @@ namespace FlaxEditor.Surface.Archetypes
                 DefaultValues = new object[]
                 {
                     Guid.Empty,
-                    string.Empty
+                    string.Empty,
                 },
                 Elements = new[]
                 {
@@ -1590,9 +1624,9 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Platform Switch",
                 Description = "Gets the input value based on the runtime-platform type",
                 Flags = NodeFlags.AllGraphs,
-                Size = new Float2(220, 240),
+                Size = new Float2(220, 260),
                 ConnectionsHints = ConnectionsHint.Value,
-                IndependentBoxes = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
+                IndependentBoxes = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 },
                 DependentBoxes = new[] { 0 },
                 Elements = new[]
                 {
@@ -1609,6 +1643,7 @@ namespace FlaxEditor.Surface.Archetypes
                     NodeElementArchetype.Factory.Input(9, "PlayStation 5", true, null, 10),
                     NodeElementArchetype.Factory.Input(10, "Mac", true, null, 11),
                     NodeElementArchetype.Factory.Input(11, "iOS", true, null, 12),
+                    NodeElementArchetype.Factory.Input(12, "Web", true, null, 13),
                 }
             },
             new NodeArchetype
@@ -1811,7 +1846,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Reroute",
                 Create = (id, context, arch, groupArch) => new RerouteNode(id, context, arch, groupArch),
                 Description = "Reroute a connection.",
-                Flags = NodeFlags.NoCloseButton | NodeFlags.NoSpawnViaGUI | NodeFlags.AllGraphs,
+                Flags = NodeFlags.NoCloseButton | NodeFlags.NoSpawnViaGUI | NodeFlags.AllGraphs | NodeFlags.FixedSize,
                 Size = RerouteNode.DefaultSize,
                 ConnectionsHints = ConnectionsHint.All,
                 IndependentBoxes = new int[] { 0 },

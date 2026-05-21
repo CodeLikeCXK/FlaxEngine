@@ -92,7 +92,7 @@ class GPUModelSDFTask : public GPUTask
     GPUTexture* _sdfResult;
     Float3 _xyzToLocalMul, _xyzToLocalAdd;
 #if GPU_ALLOW_PROFILE_EVENTS
-    GPUTimerQuery* _timerQuery;
+    uint64 _timerQuery = 0;
 #endif
 
     const uint32 ThreadGroupSize = 64;
@@ -124,17 +124,11 @@ public:
         , _sdfResult(sdfResult)
         , _xyzToLocalMul(xyzToLocalMul)
         , _xyzToLocalAdd(xyzToLocalAdd)
-#if GPU_ALLOW_PROFILE_EVENTS
-        , _timerQuery(GPUDevice::Instance->CreateTimerQuery())
-#endif
     {
     }
 
     ~GPUModelSDFTask()
     {
-#if GPU_ALLOW_PROFILE_EVENTS
-        SAFE_DELETE_GPU_RESOURCE(_timerQuery);
-#endif
     }
 
     Result run(GPUTasksContext* tasksContext) override
@@ -142,7 +136,7 @@ public:
         PROFILE_GPU_CPU("GPUModelSDFTask");
         GPUContext* context = tasksContext->GPU;
 #if GPU_ALLOW_PROFILE_EVENTS
-        _timerQuery->Begin();
+        _timerQuery = context->BeginQuery(GPUQueryType::Timer);
 #endif
 
         // Allocate resources
@@ -216,7 +210,7 @@ public:
         SAFE_DELETE_GPU_RESOURCE(sdfTexture);
 
 #if GPU_ALLOW_PROFILE_EVENTS
-        _timerQuery->End();
+        context->EndQuery(_timerQuery);
 #endif
         return Result::Ok;
     }
@@ -226,8 +220,9 @@ public:
         GPUTask::OnSync();
         _signal->NotifyOne();
 #if GPU_ALLOW_PROFILE_EVENTS
-        if (_timerQuery->HasResult())
-            LOG(Info, "GPU SDF generation took {} ms", Utilities::RoundTo1DecimalPlace(_timerQuery->GetResult()));
+        uint64 time;
+        if (GPUDevice::Instance->GetQueryResult(_timerQuery, time, true))
+            LOG(Info, "GPU SDF generation took {} ms", Utilities::RoundTo1DecimalPlace(time * 0.001f));
 #endif
     }
 
@@ -443,7 +438,7 @@ bool ModelTool::GenerateModelSDF(Model* inputModel, const ModelData* modelData, 
                         minDistance *= -1; // Voxel is inside the geometry so turn it into negative distance to the surface
 
                     const int32 xAddress = x + yAddress;
-                    formatWrite(voxels.Get() + xAddress * formatStride, minDistance * encodeMAD.X + encodeMAD.Y);
+                    formatWrite(voxels.Get() + xAddress * formatStride, (float)minDistance * encodeMAD.X + encodeMAD.Y);
                 }
             }
         };
@@ -567,6 +562,7 @@ void ModelTool::Options::Serialize(SerializeStream& stream, const void* otherObj
     SERIALIZE(CalculateBoneOffsetMatrices);
     SERIALIZE(LightmapUVsSource);
     SERIALIZE(CollisionMeshesPrefix);
+    SERIALIZE(CollisionMeshesPostfix);
     SERIALIZE(CollisionType);
     SERIALIZE(PositionFormat);
     SERIALIZE(TexCoordFormat);
@@ -575,6 +571,7 @@ void ModelTool::Options::Serialize(SerializeStream& stream, const void* otherObj
     SERIALIZE(Translation);
     SERIALIZE(UseLocalOrigin);
     SERIALIZE(CenterGeometry);
+    SERIALIZE(IgnoreNodesScale);
     SERIALIZE(Duration);
     SERIALIZE(FramesRange);
     SERIALIZE(DefaultFrameRate);
@@ -592,6 +589,7 @@ void ModelTool::Options::Serialize(SerializeStream& stream, const void* otherObj
     SERIALIZE(SloppyOptimization);
     SERIALIZE(LODTargetError);
     SERIALIZE(ImportMaterials);
+    SERIALIZE(CreateEmptyMaterialSlots);
     SERIALIZE(ImportMaterialsAsInstances);
     SERIALIZE(InstanceToImportAs);
     SERIALIZE(ImportTextures);
@@ -621,6 +619,7 @@ void ModelTool::Options::Deserialize(DeserializeStream& stream, ISerializeModifi
     DESERIALIZE(CalculateBoneOffsetMatrices);
     DESERIALIZE(LightmapUVsSource);
     DESERIALIZE(CollisionMeshesPrefix);
+    DESERIALIZE(CollisionMeshesPostfix);
     DESERIALIZE(CollisionType);
     DESERIALIZE(PositionFormat);
     DESERIALIZE(TexCoordFormat);
@@ -629,6 +628,7 @@ void ModelTool::Options::Deserialize(DeserializeStream& stream, ISerializeModifi
     DESERIALIZE(Translation);
     DESERIALIZE(UseLocalOrigin);
     DESERIALIZE(CenterGeometry);
+    DESERIALIZE(IgnoreNodesScale);
     DESERIALIZE(Duration);
     DESERIALIZE(FramesRange);
     DESERIALIZE(DefaultFrameRate);
@@ -646,6 +646,7 @@ void ModelTool::Options::Deserialize(DeserializeStream& stream, ISerializeModifi
     DESERIALIZE(SloppyOptimization);
     DESERIALIZE(LODTargetError);
     DESERIALIZE(ImportMaterials);
+    DESERIALIZE(CreateEmptyMaterialSlots);
     DESERIALIZE(ImportMaterialsAsInstances);
     DESERIALIZE(InstanceToImportAs);
     DESERIALIZE(ImportTextures);
@@ -1022,7 +1023,7 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
             options.ImportTypes |= ImportDataTypes::Skeleton;
         break;
     case ModelType::Prefab:
-        options.ImportTypes = ImportDataTypes::Geometry | ImportDataTypes::Nodes | ImportDataTypes::Animations;
+        options.ImportTypes = ImportDataTypes::Geometry | ImportDataTypes::Nodes | ImportDataTypes::Skeleton | ImportDataTypes::Animations;
         if (options.ImportMaterials)
             options.ImportTypes |= ImportDataTypes::Materials;
         if (options.ImportTextures)
@@ -1048,6 +1049,8 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
         {
             for (auto& mesh : lod.Meshes)
             {
+                if (mesh->BlendShapes.IsEmpty())
+                    continue;
                 for (int32 blendShapeIndex = mesh->BlendShapes.Count() - 1; blendShapeIndex >= 0; blendShapeIndex--)
                 {
                     auto& blendShape = mesh->BlendShapes[blendShapeIndex];
@@ -1212,7 +1215,9 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
         for (int32 i = 0; i < meshesCount; i++)
         {
             const auto mesh = data.LODs[0].Meshes[i];
-            if (mesh->BlendIndices.IsEmpty() || mesh->BlendWeights.IsEmpty())
+
+            // If imported mesh has skeleton but no indices or weights then need to setup those (except in Prefab mode when we conditionally import meshes based on type)
+            if ((mesh->BlendIndices.IsEmpty() || mesh->BlendWeights.IsEmpty()) && data.Skeleton.Bones.HasItems() && (options.Type != ModelType::Prefab))
             {
                 auto indices = Int4::Zero;
                 auto weights = Float4::UnitX;
@@ -1329,11 +1334,12 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
         auto& texture = data.Textures[i];
 
         // Auto-import textures
-        if (autoImportOutput.IsEmpty() || EnumHasNoneFlags(options.ImportTypes, ImportDataTypes::Textures) || texture.FilePath.IsEmpty())
+        if (autoImportOutput.IsEmpty() || EnumHasNoneFlags(options.ImportTypes, ImportDataTypes::Textures) || texture.FilePath.IsEmpty() || options.CreateEmptyMaterialSlots)
             continue;
         String assetPath = GetAdditionalImportPath(autoImportOutput, importedFileNames, StringUtils::GetFileNameWithoutExtension(texture.FilePath));
 #if COMPILE_WITH_ASSETS_IMPORTER
         TextureTool::Options textureOptions;
+        textureOptions.sRGB = texture.sRGB;
         switch (texture.Type)
         {
         case TextureEntry::TypeHint::ColorRGB:
@@ -1344,6 +1350,7 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
             break;
         case TextureEntry::TypeHint::Normals:
             textureOptions.Type = TextureFormatType::NormalMap;
+            textureOptions.sRGB = false;
             break;
         }
         AssetsImportingManager::ImportIfEdited(texture.FilePath, assetPath, texture.AssetID, &textureOptions);
@@ -1384,6 +1391,10 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
                 continue;
             }
         }
+
+        // The rest of the steps this function performs become irrelevant when we're only creating slots.
+        if (options.CreateEmptyMaterialSlots)
+            continue;
 
         if (options.ImportMaterialsAsInstances)
         {
@@ -1830,7 +1841,7 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
     }
 
     // Collision mesh output
-    if (options.CollisionMeshesPrefix.HasChars())
+    if (options.CollisionMeshesPrefix.HasChars() || options.CollisionMeshesPostfix.HasChars())
     {
         // Extract collision meshes from the model
         ModelData collisionModel;
@@ -1839,7 +1850,8 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
             for (int32 i = lod.Meshes.Count() - 1; i >= 0; i--)
             {
                 auto mesh = lod.Meshes[i];
-                if (mesh->Name.StartsWith(options.CollisionMeshesPrefix, StringSearchCase::IgnoreCase))
+                if ((options.CollisionMeshesPrefix.HasChars() && mesh->Name.StartsWith(options.CollisionMeshesPrefix, StringSearchCase::IgnoreCase)) ||
+                    (options.CollisionMeshesPostfix.HasChars() && mesh->Name.EndsWith(options.CollisionMeshesPostfix, StringSearchCase::IgnoreCase)))
                 {
                     // Remove material slot used by this mesh (if no other mesh else uses it)
                     int32 materialSlotUsageCount = 0;
@@ -2021,12 +2033,11 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
 #undef REMAP_VERTEX_BUFFER
 
                 // Remap blend shapes
-                dstMesh->BlendShapes.Resize(srcMesh->BlendShapes.Count());
+                dstMesh->BlendShapes.EnsureCapacity(srcMesh->BlendShapes.Count(), false);
                 for (int32 blendShapeIndex = 0; blendShapeIndex < srcMesh->BlendShapes.Count(); blendShapeIndex++)
                 {
                     const auto& srcBlendShape = srcMesh->BlendShapes[blendShapeIndex];
-                    auto& dstBlendShape = dstMesh->BlendShapes[blendShapeIndex];
-
+                    BlendShape dstBlendShape;
                     dstBlendShape.Name = srcBlendShape.Name;
                     dstBlendShape.Weight = srcBlendShape.Weight;
                     dstBlendShape.Vertices.EnsureCapacity(srcBlendShape.Vertices.Count());
@@ -2035,17 +2046,12 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
                         auto v = srcBlendShape.Vertices[i];
                         v.VertexIndex = remap[v.VertexIndex];
                         if (v.VertexIndex != ~0u)
-                        {
                             dstBlendShape.Vertices.Add(v);
-                        }
                     }
-                }
 
-                // Remove empty blend shapes
-                for (int32 blendShapeIndex = dstMesh->BlendShapes.Count() - 1; blendShapeIndex >= 0; blendShapeIndex--)
-                {
-                    if (dstMesh->BlendShapes[blendShapeIndex].Vertices.IsEmpty())
-                        dstMesh->BlendShapes.RemoveAt(blendShapeIndex);
+                    // Add only valid blend shapes 
+                    if (dstBlendShape.Vertices.HasItems())
+                        dstMesh->BlendShapes.Add(dstBlendShape);
                 }
 
                 // Optimize generated LOD
@@ -2092,6 +2098,8 @@ bool ModelTool::ImportModel(const String& path, ModelData& data, Options& option
     {
         for (auto& mesh : lod.Meshes)
         {
+            if (mesh->BlendShapes.IsEmpty())
+                continue;
             for (auto& blendShape : mesh->BlendShapes)
             {
                 // Compute min/max for used vertex indices

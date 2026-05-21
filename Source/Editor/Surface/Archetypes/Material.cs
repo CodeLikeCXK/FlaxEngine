@@ -304,35 +304,25 @@ namespace FlaxEditor.Surface.Archetypes
             }
         }
 
-        internal sealed class CustomCodeNode : SurfaceNode
+        internal sealed class CustomCodeNode : ResizableSurfaceNode
         {
-            private Rectangle _resizeButtonRect;
-            private Float2 _startResizingSize;
-            private Float2 _startResizingCornerOffset;
-            private bool _isResizing;
             private CustomCodeTextBox _textBox;
-
-            private int SizeValueIndex => Archetype.TypeID == 8 ? 1 : 3; // Index of the Size stored in Values array
-
-            private Float2 SizeValue
-            {
-                get => (Float2)Values[SizeValueIndex];
-                set => SetValue(SizeValueIndex, value, false);
-            }
 
             public CustomCodeNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
             : base(id, context, nodeArch, groupArch)
             {
-                Float2 pos = new Float2(FlaxEditor.Surface.Constants.NodeMarginX, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize), size;
+                _sizeValueIndex = Archetype.TypeID == 8 ? 1 : 3; // Index of the Size stored in Values array
+                Float2 pos = new Float2(FlaxEditor.Surface.Constants.NodeMarginX, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight), size;
                 if (nodeArch.TypeID == 8)
                 {
-                    pos += new Float2(60, 0);
-                    size = new Float2(172, 200);
+                    pos += new Float2(65, 0);
+                    size = new Float2(160, 185);
+                    _sizeMin = new Float2(240, 185);
                 }
                 else
                 {
-                    pos += new Float2(0, 40);
-                    size = new Float2(300, 200);
+                    pos += new Float2(0, 40 + FlaxEditor.Utilities.Constants.UIMargin * 2f);
+                    size = new Float2(300, 180);
                 }
                 _textBox = new CustomCodeTextBox
                 {
@@ -345,125 +335,18 @@ namespace FlaxEditor.Surface.Archetypes
                 _textBox.EditEnd += () => SetValue(0, _textBox.Text);
             }
 
-            public override bool CanSelect(ref Float2 location)
-            {
-                return base.CanSelect(ref location) && !_resizeButtonRect.MakeOffsetted(Location).Contains(ref location);
-            }
-
             public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
                 base.OnSurfaceLoaded(action);
 
                 _textBox.Text = (string)Values[0];
-
-                var size = SizeValue;
-                if (Surface != null && Surface.GridSnappingEnabled)
-                    size = Surface.SnapToGrid(size, true);
-                Resize(size.X, size.Y);
             }
 
             public override void OnValuesChanged()
             {
                 base.OnValuesChanged();
 
-                var size = SizeValue;
-                Resize(size.X, size.Y);
                 _textBox.Text = (string)Values[0];
-            }
-
-            protected override void UpdateRectangles()
-            {
-                base.UpdateRectangles();
-
-                const float buttonMargin = FlaxEditor.Surface.Constants.NodeCloseButtonMargin;
-                const float buttonSize = FlaxEditor.Surface.Constants.NodeCloseButtonSize;
-                _resizeButtonRect = new Rectangle(_closeButtonRect.Left, Height - buttonSize - buttonMargin - 4, buttonSize, buttonSize);
-            }
-
-            public override void Draw()
-            {
-                base.Draw();
-
-                var style = Style.Current;
-                if (_isResizing)
-                {
-                    Render2D.FillRectangle(_resizeButtonRect, style.Selection);
-                    Render2D.DrawRectangle(_resizeButtonRect, style.SelectionBorder);
-                }
-                Render2D.DrawSprite(style.Scale, _resizeButtonRect, _resizeButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
-            }
-
-            public override void OnLostFocus()
-            {
-                if (_isResizing)
-                    EndResizing();
-
-                base.OnLostFocus();
-            }
-
-            public override void OnEndMouseCapture()
-            {
-                if (_isResizing)
-                    EndResizing();
-
-                base.OnEndMouseCapture();
-            }
-
-            public override bool OnMouseDown(Float2 location, MouseButton button)
-            {
-                if (base.OnMouseDown(location, button))
-                    return true;
-
-                if (button == MouseButton.Left && _resizeButtonRect.Contains(ref location) && Surface.CanEdit)
-                {
-                    // Start sliding
-                    _isResizing = true;
-                    _startResizingSize = Size;
-                    _startResizingCornerOffset = Size - location;
-                    StartMouseCapture();
-                    Cursor = CursorType.SizeNWSE;
-                    return true;
-                }
-
-                return false;
-            }
-
-            public override void OnMouseMove(Float2 location)
-            {
-                if (_isResizing)
-                {
-                    var emptySize = CalculateNodeSize(0, 0);
-                    var size = Float2.Max(location - emptySize + _startResizingCornerOffset, new Float2(240, 160));
-                    Resize(size.X, size.Y);
-                }
-                else
-                {
-                    base.OnMouseMove(location);
-                }
-            }
-
-            public override bool OnMouseUp(Float2 location, MouseButton button)
-            {
-                if (button == MouseButton.Left && _isResizing)
-                {
-                    EndResizing();
-                    return true;
-                }
-
-                return base.OnMouseUp(location, button);
-            }
-
-            private void EndResizing()
-            {
-                Cursor = CursorType.Default;
-                EndMouseCapture();
-                _isResizing = false;
-                if (_startResizingSize != Size)
-                {
-                    var emptySize = CalculateNodeSize(0, 0);
-                    SizeValue = Size - emptySize;
-                    Surface.MarkAsEdited(false);
-                }
             }
         }
 
@@ -624,8 +507,8 @@ namespace FlaxEditor.Surface.Archetypes
                 Size = new Float2(300, 200),
                 DefaultValues = new object[]
                 {
-                    "// Here you can add HLSL code\nOutput0 = Input0;",
-                    new Float2(300, 200),
+                    "// You can add HLSL code here\nOutput0 = Input0;",
+                    new Float2(350, 200),
                 },
                 Elements = new[]
                 {
@@ -704,8 +587,9 @@ namespace FlaxEditor.Surface.Archetypes
                 TypeID = 13,
                 Title = "Pre-skinned Local Position",
                 Description = "Per vertex local position (before skinning)",
+                AlternativeTitles = new[] { "Vertex Position", "Pre skinning Local Vertex Position" },
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Float2(230, 40),
+                Size = new Float2(270, 40),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float3), 0),
@@ -716,8 +600,9 @@ namespace FlaxEditor.Surface.Archetypes
                 TypeID = 14,
                 Title = "Pre-skinned Local Normal",
                 Description = "Per vertex local normal (before skinning)",
+                AlternativeTitles = new[] { "Vertex Normal", "Pre skinning Local Normal" },
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Float2(230, 40),
+                Size = new Float2(270, 40),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float3), 0),
@@ -922,8 +807,8 @@ namespace FlaxEditor.Surface.Archetypes
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "A", true, null, 0),
-                    NodeElementArchetype.Factory.Input(1, "B", true, null, 1),
+                    NodeElementArchetype.Factory.Input(0, "UV", true, null, 0),
+                    NodeElementArchetype.Factory.Input(1, "Center", true, null, 1),
                     NodeElementArchetype.Factory.Input(2, "Radius", true, typeof(float), 2, 0),
                     NodeElementArchetype.Factory.Input(3, "Hardness", true, typeof(float), 3, 1),
                     NodeElementArchetype.Factory.Input(4, "Invert", true, typeof(bool), 4, 2),
@@ -1047,7 +932,7 @@ namespace FlaxEditor.Surface.Archetypes
             new NodeArchetype
             {
                 TypeID = 36,
-                Title = "HSVToRGB",
+                Title = "HSV To RGB",
                 Description = "Converts a HSV value to linear RGB [X = 0/360, Y = 0/1, Z = 0/1]",
                 Flags = NodeFlags.MaterialGraph,
                 Size = new Float2(160, 25),
@@ -1064,7 +949,7 @@ namespace FlaxEditor.Surface.Archetypes
             new NodeArchetype
             {
                 TypeID = 37,
-                Title = "RGBToHSV",
+                Title = "RGB To HSV",
                 Description = "Converts a linear RGB value to HSV [X = 0/360, Y = 0/1, Z = 0/1]",
                 Flags = NodeFlags.MaterialGraph,
                 Size = new Float2(160, 25),
@@ -1088,7 +973,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Size = new Float2(300, 240),
                 DefaultValues = new object[]
                 {
-                    "// Here you can add HLSL code\nfloat4 GetCustomColor()\n{\n\treturn float4(1, 0, 0, 1);\n}",
+                    "// You can add HLSL code here\nfloat4 GetCustomColor()\n{\n\treturn float4(1, 0, 0, 1);\n}",
                     true,
                     (int)MaterialTemplateInputsMapping.Utilities,
                     new Float2(300, 240),
@@ -1346,6 +1231,32 @@ namespace FlaxEditor.Surface.Archetypes
                     NodeElementArchetype.Factory.Enum(0, 0, 120, 0, typeof(BlendMode)), // Blend mode selector
                     NodeElementArchetype.Factory.Output(0, "Result", typeof(Float4), 3),
                 }
+            },
+            new NodeArchetype
+            {
+                TypeID = 52,
+                Title = "Linear to sRGB",
+                Description = "Converts linear color into sRGB.",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(150, 20),
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "Linear", true, typeof(Float3), 0),
+                    NodeElementArchetype.Factory.Output(0, "sRGB", typeof(Float3), 1),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 53,
+                Title = "sRGB to Linear",
+                Description = "Converts sRGB color into linear.",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(150, 20),
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "sRGB", true, typeof(Float3), 0),
+                    NodeElementArchetype.Factory.Output(0, "Linear", typeof(Float3), 1),
+                ]
             },
         };
     }

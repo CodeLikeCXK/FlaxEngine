@@ -96,9 +96,9 @@ namespace
         }
     };
 
-    Dictionary<Guid, ScriptingObjectData> _objectsDictionary(1024 * 16);
+    Dictionary<Guid, ScriptingObjectData> _objectsDictionary;
 #else
-    Dictionary<Guid, ScriptingObject*> _objectsDictionary(1024 * 16);
+    Dictionary<Guid, ScriptingObject*> _objectsDictionary;
 #endif
     bool _isEngineAssemblyLoaded = false;
     bool _hasGameModulesLoaded = false;
@@ -178,6 +178,8 @@ bool ScriptingService::Init()
 {
     PROFILE_MEM(Scripting);
     Stopwatch stopwatch;
+
+    _objectsDictionary.EnsureCapacity(16 * 1024);
 
     // Initialize managed runtime
     if (MCore::LoadEngine())
@@ -502,6 +504,7 @@ bool Scripting::LoadBinaryModules(const String& path, const String& projectFolde
             // C#
             if (managedPath.HasChars() && !((ManagedBinaryModule*)module)->Assembly->IsLoaded())
             {
+                (((ManagedBinaryModule*)module)->Assembly)->_canReload = module->CanReload;
                 if (((ManagedBinaryModule*)module)->Assembly->Load(managedPath, nativePath))
                 {
                     LOG(Error, "Failed to load C# assembly '{0}' for binary module {1}.", managedPath, name);
@@ -528,6 +531,7 @@ bool Scripting::Load()
 #if USE_CSHARP
     // Load C# core assembly
     ManagedBinaryModule* corlib = GetBinaryModuleCorlib();
+    corlib->CanReload = false;
     if (corlib->Assembly->LoadCorlib())
     {
         LOG(Error, "Failed to load corlib C# assembly.");
@@ -571,6 +575,7 @@ bool Scripting::Load()
     auto* flaxEngineModule = (NativeBinaryModule*)GetBinaryModuleFlaxEngine();
     if (!flaxEngineModule->Assembly->IsLoaded())
     {
+#if USE_CSHARP
         String flaxEnginePath = Globals::BinariesFolder / TEXT("FlaxEngine.CSharp.dll");
 #if USE_MONO_AOT
         if (!FileSystem::FileExists(flaxEnginePath))
@@ -581,6 +586,9 @@ bool Scripting::Load()
             LOG(Error, "Failed to load FlaxEngine C# assembly.");
             return true;
         }
+#endif
+        flaxEngineModule->CanReload = false;
+        flaxEngineModule->Assembly->_canReload = false;
         onEngineLoaded(flaxEngineModule->Assembly);
 
         // Insert type aliases for vector types that don't exist in C++ but are just typedef (properly redirect them to actual types)

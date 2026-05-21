@@ -132,9 +132,7 @@ int32 AudioClip::GetFirstBufferIndex(float time, float& offset) const
         if (_buffersStartTimes[i + 1] > time)
         {
             offset = time - _buffersStartTimes[i];
-#if BUILD_DEBUG
-            ASSERT(Math::Abs(GetBufferStartTime(i) + offset - time) < 0.001f);
-#endif
+            ASSERT_LOW_LAYER(Math::Abs(GetBufferStartTime(i) + offset - time) < 0.001f);
             return i;
         }
     }
@@ -196,6 +194,7 @@ bool AudioClip::ExtractData(Array<byte>& resultData, AudioDataInfo& resultDataIn
 
 bool AudioClip::ExtractDataFloat(Array<float>& resultData, AudioDataInfo& resultDataInfo)
 {
+#if COMPILE_WITH_AUDIO_TOOL
     // Extract PCM data
     Array<byte> data;
     if (ExtractDataRaw(data, resultDataInfo))
@@ -207,6 +206,9 @@ bool AudioClip::ExtractDataFloat(Array<float>& resultData, AudioDataInfo& result
     resultDataInfo.BitDepth = 32;
 
     return false;
+#else
+    return true;
+#endif
 }
 
 bool AudioClip::ExtractDataRaw(Array<byte>& resultData, AudioDataInfo& resultDataInfo)
@@ -477,6 +479,7 @@ bool AudioClip::WriteBuffer(int32 chunkIndex)
     }
     info.NumSamples = Math::AlignDown(data.Length() / bytesPerSample, info.NumChannels * bytesPerSample);
 
+#if COMPILE_WITH_AUDIO_TOOL
     // Convert to Mono if used as 3D source and backend doesn't support it
     if (Is3D() && info.NumChannels > 1 && EnumHasNoneFlags(AudioBackend::Features(), AudioBackend::FeatureFlags::SpatialMultiChannel))
     {
@@ -488,6 +491,7 @@ bool AudioClip::WriteBuffer(int32 chunkIndex)
         info.NumSamples = samplesPerChannel;
         data = Span<byte>(tmp2.Get(), tmp2.Count());
     }
+#endif
 
     // Write samples to the audio buffer (create one if missing)
     Locker.Lock(); // StreamingTask loads buffers without lock so do it here

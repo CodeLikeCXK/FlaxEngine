@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 
 namespace FlaxEngine
 {
-    partial struct Rectangle : IEquatable<Rectangle>
+    partial struct Rectangle : IEquatable<Rectangle>, Json.ICustomValueEquals
     {
         /// <summary>
         /// A <see cref="Rectangle"/> which represents an empty space.
@@ -251,6 +251,16 @@ namespace FlaxEngine
         public Rectangle MakeOffsetted(float x, float y)
         {
             return new Rectangle(Location + new Float2(x, y), Size);
+        }
+
+        /// <summary>
+        /// Make offseted rectangle
+        /// </summary>
+        /// <param name="offset">Offset (will be applied to X- and Y- axis).</param>
+        /// <returns>Offseted rectangle.</returns>
+        public Rectangle MakeOffsetted(float offset)
+        {
+            return new Rectangle(Location + offset, Size);
         }
 
         /// <summary>
@@ -521,6 +531,13 @@ namespace FlaxEngine
             {
                 return (Location.GetHashCode() * 397) ^ Size.GetHashCode();
             }
+        }
+
+        /// <inheritdoc />
+        public bool ValueEquals(object other)
+        {
+            var o = (Rectangle)other;
+            return Equals(ref o);
         }
 
         /// <inheritdoc />

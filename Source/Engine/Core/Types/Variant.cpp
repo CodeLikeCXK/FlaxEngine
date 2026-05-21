@@ -1,7 +1,6 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Variant.h"
-#include "CommonValue.h"
 #include "Engine/Core/Collections/HashFunctions.h"
 #include "Engine/Core/Collections/Dictionary.h"
 #include "Engine/Content/Asset.h"
@@ -18,8 +17,10 @@
 #include "Engine/Core/Math/Ray.h"
 #include "Engine/Core/Math/Rectangle.h"
 #include "Engine/Core/Math/Transform.h"
+#include "Engine/Scripting/BinaryModule.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Scripting/ScriptingObject.h"
+#include "Engine/Scripting/ManagedCLR/MAssembly.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "Engine/Scripting/ManagedCLR/MCore.h"
 #include "Engine/Scripting/ManagedCLR/MUtils.h"
@@ -88,6 +89,7 @@ static_assert((int32)VariantType::Types::MAX == ARRAY_COUNT(InBuiltTypesTypeName
 VariantType::VariantType(Types type, const StringView& typeName)
 {
     Type = type;
+    StaticName = 0;
     TypeName = nullptr;
     const int32 length = typeName.Length();
     if (length)
@@ -98,32 +100,41 @@ VariantType::VariantType(Types type, const StringView& typeName)
     }
 }
 
-VariantType::VariantType(Types type, const StringAnsiView& typeName)
+VariantType::VariantType(Types type, const StringAnsiView& typeName, bool staticName)
 {
     Type = type;
-    TypeName = nullptr;
-    int32 length = typeName.Length();
-    if (length)
+    StaticName = staticName && (typeName.HasChars() && typeName[typeName.Length()] == 0); // Require string to be null-terminated (not fully safe check)
+    if (staticName)
     {
-        TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
-        Platform::MemoryCopy(TypeName, typeName.Get(), length);
-        TypeName[length] = 0;
+        TypeName = (char*)typeName.Get();
     }
+    else
+    {
+        TypeName = nullptr;
+        int32 length = typeName.Length();
+        if (length)
+        {
+            TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
+            Platform::MemoryCopy(TypeName, typeName.Get(), length);
+            TypeName[length] = 0;
+        }
+    }
+}
+
+VariantType::VariantType(Types type, const ScriptingType& sType)
+    : VariantType(type)
+{
+    SetTypeName(sType.Fullname, sType.Module->CanReload);
 }
 
 VariantType::VariantType(Types type, const MClass* klass)
 {
     Type = type;
+    StaticName = false;
     TypeName = nullptr;
 #if USE_CSHARP
     if (klass)
-    {
-        const StringAnsiView typeName = klass->GetFullName();
-        const int32 length = typeName.Length();
-        TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
-        Platform::MemoryCopy(TypeName, typeName.Get(), length);
-        TypeName[length] = 0;
-    }
+        SetTypeName(*klass);
 #endif
 }
 
@@ -160,7 +171,7 @@ VariantType::VariantType(const StringAnsiView& typeName)
     // Check case for array
     if (typeName.EndsWith(StringAnsiView("[]"), StringSearchCase::CaseSensitive))
     {
-        new(this) VariantType(Array, StringAnsiView(typeName.Get(), typeName.Length() - 2));
+        new(this) VariantType(Array, typeName);
         return;
     }
 
@@ -190,9 +201,9 @@ VariantType::VariantType(const StringAnsiView& typeName)
     if (const auto mclass = Scripting::FindClass(typeName))
     {
         if (mclass->IsEnum())
-            new(this) VariantType(Enum, typeName);
+            new(this) VariantType(Enum, mclass);
         else
-            new(this) VariantType(ManagedObject, typeName);
+            new(this) VariantType(ManagedObject, mclass);
         return;
     }
 #endif
@@ -204,36 +215,48 @@ VariantType::VariantType(const StringAnsiView& typeName)
 VariantType::VariantType(const VariantType& other)
 {
     Type = other.Type;
-    TypeName = nullptr;
-    const int32 length = StringUtils::Length(other.TypeName);
-    if (length)
+    StaticName = other.StaticName;
+    if (StaticName)
     {
-        TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
-        Platform::MemoryCopy(TypeName, other.TypeName, length);
-        TypeName[length] = 0;
+        TypeName = other.TypeName;
+    }
+    else
+    {
+        TypeName = nullptr;
+        const int32 length = StringUtils::Length(other.TypeName);
+        if (length)
+        {
+            TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
+            Platform::MemoryCopy(TypeName, other.TypeName, length);
+            TypeName[length] = 0;
+        }
     }
 }
 
 VariantType::VariantType(VariantType&& other) noexcept
 {
     Type = other.Type;
+    StaticName = other.StaticName;
     TypeName = other.TypeName;
     other.Type = Null;
     other.TypeName = nullptr;
+    other.StaticName = 0;
 }
 
 VariantType& VariantType::operator=(const Types& type)
 {
     Type = type;
-    Allocator::Free(TypeName);
+    if (!StaticName)
+        Allocator::Free(TypeName);
     TypeName = nullptr;
+    StaticName = 0;
     return *this;
 }
 
 VariantType& VariantType::operator=(VariantType&& other)
 {
     ASSERT(this != &other);
-    Swap(Type, other.Type);
+    Swap(Packed, other.Packed);
     Swap(TypeName, other.TypeName);
     return *this;
 }
@@ -242,14 +265,23 @@ VariantType& VariantType::operator=(const VariantType& other)
 {
     ASSERT(this != &other);
     Type = other.Type;
-    Allocator::Free(TypeName);
-    TypeName = nullptr;
-    const int32 length = StringUtils::Length(other.TypeName);
-    if (length)
+    if (!StaticName)
+        Allocator::Free(TypeName);
+    StaticName = other.StaticName;
+    if (StaticName)
     {
-        TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
-        Platform::MemoryCopy(TypeName, other.TypeName, length);
-        TypeName[length] = 0;
+        TypeName = other.TypeName;
+    }
+    else
+    {
+        TypeName = nullptr;
+        const int32 length = StringUtils::Length(other.TypeName);
+        if (length)
+        {
+            TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
+            Platform::MemoryCopy(TypeName, other.TypeName, length);
+            TypeName[length] = 0;
+        }
     }
     return *this;
 }
@@ -283,22 +315,43 @@ void VariantType::SetTypeName(const StringView& typeName)
 {
     if (StringUtils::Length(TypeName) != typeName.Length())
     {
-        Allocator::Free(TypeName);
+        if (!StaticName)
+            Allocator::Free(TypeName);
+        StaticName = 0;
         TypeName = static_cast<char*>(Allocator::Allocate(typeName.Length() + 1));
         TypeName[typeName.Length()] = 0;
     }
     StringUtils::ConvertUTF162ANSI(typeName.Get(), TypeName, typeName.Length());
 }
 
-void VariantType::SetTypeName(const StringAnsiView& typeName)
+void VariantType::SetTypeName(const StringAnsiView& typeName, bool staticName)
 {
-    if (StringUtils::Length(TypeName) != typeName.Length())
+    if (StringUtils::Length(TypeName) != typeName.Length() || StaticName != staticName)
     {
-        Allocator::Free(TypeName);
+        if (!StaticName)
+            Allocator::Free(TypeName);
+        StaticName = staticName;
+        if (staticName)
+        {
+            TypeName = (char*)typeName.Get();
+            return;
+        }
         TypeName = static_cast<char*>(Allocator::Allocate(typeName.Length() + 1));
         TypeName[typeName.Length()] = 0;
     }
     Platform::MemoryCopy(TypeName, typeName.Get(), typeName.Length());
+}
+
+void VariantType::SetTypeName(const ScriptingType& type)
+{
+    SetTypeName(type.Fullname, type.Module->CanReload);
+}
+
+void VariantType::SetTypeName(const MClass& klass)
+{
+#if USE_CSHARP
+    SetTypeName(klass.GetFullName(), klass.GetAssembly()->CanReload());
+#endif
 }
 
 const char* VariantType::GetTypeName() const
@@ -320,6 +373,29 @@ VariantType VariantType::GetElementType() const
         return VariantType(Object);
     }
     return VariantType();
+}
+
+void VariantType::Inline()
+{
+    // Check if the typename comes from static assembly which can be used to inline name instead of dynamic memory allocation
+    StringAnsiView typeName(TypeName);
+    auto& modules = BinaryModule::GetModules();
+    for (auto module : modules)
+    {
+        int32 typeIndex;
+        if (!module->CanReload && module->FindScriptingType(typeName, typeIndex))
+        {
+            ScriptingTypeHandle typeHandle(module, typeIndex);
+            SetTypeName(typeHandle.GetType().Fullname, true);
+            return;
+        }
+    }
+
+#if USE_CSHARP
+    // Try with C#-only types
+    if (const auto mclass = Scripting::FindClass(TypeName))
+        SetTypeName(*mclass);
+#endif
 }
 
 ::String VariantType::ToString() const
@@ -632,8 +708,7 @@ Variant::Variant(ScriptingObject* v)
     AsObject = v;
     if (v)
     {
-        // TODO: optimize VariantType to support statically linked typename of ScriptingType (via 1 bit flag within Types enum, only in game as editor might hot-reload types)
-        Type.SetTypeName(v->GetType().Fullname);
+        Type.SetTypeName(v->GetType());
         v->Deleted.Bind<Variant, &Variant::OnObjectDeleted>(this);
     }
 }
@@ -644,9 +719,8 @@ Variant::Variant(Asset* v)
     AsAsset = v;
     if (v)
     {
-        // TODO: optimize VariantType to support statically linked typename of ScriptingType (via 1 bit flag within Types enum, only in game as editor might hot-reload types)
-        Type.SetTypeName(v->GetType().Fullname);
         v->AddReference();
+        Type.SetTypeName(v->GetType());
         v->OnUnloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
     }
 }
@@ -888,78 +962,6 @@ Variant::Variant(const Span<byte>& v)
         AsBlob.Data = nullptr;
     }
 }
-
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-#include "Engine/Content/Deprecated.h"
-Variant::Variant(const CommonValue& value)
-    : Variant()
-{
-    // [Deprecated on 31.07.2020, expires on 31.07.2022]
-    MARK_CONTENT_DEPRECATED();
-    switch (value.Type)
-    {
-    case CommonType::Bool:
-        *this = value.AsBool;
-        break;
-    case CommonType::Integer:
-        *this = value.AsInteger;
-        break;
-    case CommonType::Float:
-        *this = value.AsFloat;
-        break;
-    case CommonType::Vector2:
-        *this = value.AsVector2;
-        break;
-    case CommonType::Vector3:
-        *this = value.AsVector3;
-        break;
-    case CommonType::Vector4:
-        *this = value.AsVector4;
-        break;
-    case CommonType::Color:
-        *this = value.AsColor;
-        break;
-    case CommonType::Guid:
-        *this = value.AsGuid;
-        break;
-    case CommonType::String:
-        SetString(StringView(value.AsString));
-        break;
-    case CommonType::Box:
-        *this = Variant(value.AsBox);
-        break;
-    case CommonType::Rotation:
-        *this = value.AsRotation;
-        break;
-    case CommonType::Transform:
-        *this = Variant(value.AsTransform);
-        break;
-    case CommonType::Sphere:
-        *this = value.AsSphere;
-        break;
-    case CommonType::Rectangle:
-        *this = value.AsRectangle;
-        break;
-    case CommonType::Pointer:
-        *this = value.AsPointer;
-        break;
-    case CommonType::Matrix:
-        *this = Variant(value.AsMatrix);
-        break;
-    case CommonType::Blob:
-        SetBlob(value.AsBlob.Data, value.AsBlob.Length);
-        break;
-    case CommonType::Object:
-        SetObject(value.AsObject);
-        break;
-    case CommonType::Ray:
-        *this = Variant(value.AsRay);
-        break;
-    default:
-        CRASH;
-    }
-}
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 Variant::~Variant()
 {
@@ -3007,16 +3009,16 @@ Variant Variant::NewValue(const StringAnsiView& typeName)
         switch (type.Type)
         {
         case ScriptingTypes::Script:
-            v.SetType(VariantType(VariantType::Object, typeName));
+            v.SetType(VariantType(VariantType::Object, type));
             v.AsObject = type.Script.Spawn(ScriptingObjectSpawnParams(Guid::New(), typeHandle));
             if (v.AsObject)
                 v.AsObject->Deleted.Bind<Variant, &Variant::OnObjectDeleted>(&v);
             break;
         case ScriptingTypes::Structure:
-            v.SetType(VariantType(VariantType::Structure, typeName));
+            v.SetType(VariantType(VariantType::Structure, type));
             break;
         case ScriptingTypes::Enum:
-            v.SetType(VariantType(VariantType::Enum, typeName));
+            v.SetType(VariantType(VariantType::Enum, type));
             v.AsEnum = 0;
             break;
         default:
@@ -3030,16 +3032,16 @@ Variant Variant::NewValue(const StringAnsiView& typeName)
         // Fallback to C#-only types
         if (mclass->IsEnum())
         {
-            v.SetType(VariantType(VariantType::Enum, typeName));
+            v.SetType(VariantType(VariantType::Enum, mclass));
             v.AsEnum = 0;
         }
         else if (mclass->IsValueType())
         {
-            v.SetType(VariantType(VariantType::Structure, typeName));
+            v.SetType(VariantType(VariantType::Structure, mclass));
         }
         else
         {
-            v.SetType(VariantType(VariantType::ManagedObject, typeName));
+            v.SetType(VariantType(VariantType::ManagedObject, mclass));
             MObject* instance = mclass->CreateInstance();
             if (instance)
             {

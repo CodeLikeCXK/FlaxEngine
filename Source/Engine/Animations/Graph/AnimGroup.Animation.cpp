@@ -9,6 +9,7 @@
 #include "Engine/Animations/AnimEvent.h"
 #include "Engine/Animations/InverseKinematics.h"
 #include "Engine/Level/Actors/AnimatedModel.h"
+#include "Engine/Physics/Physics.h"
 
 struct AnimSampleData
 {
@@ -109,86 +110,84 @@ namespace
             nodes->RootMotion.Orientation.Normalize();
         }
     }
-
-    Matrix ComputeWorldMatrixRecursive(const SkeletonData& skeleton, int32 index, Matrix localMatrix)
-    {
-        const auto& node = skeleton.Nodes[index];
-        index = node.ParentIndex;
-        while (index != -1)
-        {
-            const auto& parent = skeleton.Nodes[index];
-            localMatrix *= parent.LocalTransform.GetWorld();
-            index = parent.ParentIndex;
-        }
-        return localMatrix;
-    }
-
-    Matrix ComputeInverseParentMatrixRecursive(const SkeletonData& skeleton, int32 index)
-    {
-        Matrix inverseParentMatrix = Matrix::Identity;
-        const auto& node = skeleton.Nodes[index];
-        if (node.ParentIndex != -1)
-        {
-            inverseParentMatrix = ComputeWorldMatrixRecursive(skeleton, index, inverseParentMatrix);
-            inverseParentMatrix = Matrix::Invert(inverseParentMatrix);
-        }
-        return inverseParentMatrix;
-    }
 }
 
-void RetargetSkeletonNode(const SkeletonData& sourceSkeleton, const SkeletonData& targetSkeleton, const SkinnedModel::SkeletonMapping& sourceMapping, Transform& node, int32 targetIndex)
+// Utility for retargeting animation poses between skeletons.
+struct Retargeting
 {
-    // sourceSkeleton - skeleton of Anim Graph (Base Locomotion pack)
-    // targetSkeleton - visual mesh skeleton (City Characters pack)
-    // target - anim graph input/output transformation of that node
-    const auto& targetNode = targetSkeleton.Nodes[targetIndex];
-    const int32 sourceIndex = sourceMapping.NodesMapping[targetIndex];
-    if (sourceIndex == -1)
+private:
+    const Matrix* _sourcePosePtr, * _targetPosePtr;
+    const SkeletonData* _sourceSkeleton, *_targetSkeleton;
+    const SkinnedModel::SkeletonMapping* _sourceMapping;
+
+public:
+    void Init(const SkeletonData& sourceSkeleton, const SkeletonData& targetSkeleton, const SkinnedModel::SkeletonMapping& sourceMapping)
     {
-        // Use T-pose
-        node = targetNode.LocalTransform;
-        return;
+        ASSERT_LOW_LAYER(targetSkeleton.Nodes.Count() == sourceMapping.NodesMapping.Length());
+        
+        // Cache world-space poses for source and target skeletons to avoid redundant calculations during retargeting
+        _sourcePosePtr = sourceSkeleton.GetNodesPose().Get();
+        _targetPosePtr = targetSkeleton.GetNodesPose().Get();
+
+        _sourceSkeleton = &sourceSkeleton;
+        _targetSkeleton = &targetSkeleton;
+        _sourceMapping = &sourceMapping;
     }
-    const auto& sourceNode = sourceSkeleton.Nodes[sourceIndex];
 
-    // [Reference: https://wickedengine.net/2022/09/animation-retargeting/comment-page-1/]
-
-    // Calculate T-Pose of source node, target node and target parent node
-    Matrix bindMatrix = ComputeWorldMatrixRecursive(sourceSkeleton, sourceIndex, sourceNode.LocalTransform.GetWorld());
-    Matrix inverseBindMatrix = Matrix::Invert(bindMatrix);
-    Matrix targetMatrix = ComputeWorldMatrixRecursive(targetSkeleton, targetIndex, targetNode.LocalTransform.GetWorld());
-    Matrix inverseParentMatrix = ComputeInverseParentMatrixRecursive(targetSkeleton, targetIndex);
-
-    // Target node animation is world-space difference of the animated source node inside the target's parent node world-space
-    Matrix localMatrix = inverseBindMatrix * ComputeWorldMatrixRecursive(sourceSkeleton, sourceIndex, node.GetWorld());
-    localMatrix = targetMatrix * localMatrix * inverseParentMatrix;
-
-    // Extract local node transformation
-    localMatrix.Decompose(node);
-}
-
-void RetargetSkeletonPose(const SkeletonData& sourceSkeleton, const SkeletonData& targetSkeleton, const SkinnedModel::SkeletonMapping& mapping, const Transform* sourceNodes, Transform* targetNodes)
-{
-    // TODO: cache source and target skeletons world-space poses for faster retargeting (use some pooled memory)
-    ASSERT_LOW_LAYER(targetSkeleton.Nodes.Count() == mapping.NodesMapping.Length());
-    for (int32 targetIndex = 0; targetIndex < targetSkeleton.Nodes.Count(); targetIndex++)
+    void RetargetNode(const Transform& source, Transform& target, int32 sourceIndex, int32 targetIndex)
     {
-        auto& targetNode = targetSkeleton.Nodes.Get()[targetIndex];
-        const int32 sourceIndex = mapping.NodesMapping.Get()[targetIndex];
-        Transform node;
+        // sourceSkeleton - skeleton of Anim Graph
+        // targetSkeleton - visual mesh skeleton
+        // target - anim graph input/output transformation of that node
+        const SkeletonNode& targetNode = _targetSkeleton->Nodes.Get()[targetIndex];
         if (sourceIndex == -1)
         {
             // Use T-pose
-            node = targetNode.LocalTransform;
+            target = targetNode.LocalTransform;
         }
         else
         {
-            // Retarget
-            node = sourceNodes[sourceIndex];
-            RetargetSkeletonNode(sourceSkeleton, targetSkeleton, mapping, node, targetIndex);
+            // [Reference: https://wickedengine.net/2022/09/animation-retargeting/comment-page-1/]
+
+            // Calculate T-Pose of source node, target node and target parent node
+            const Matrix* sourcePosePtr = _sourcePosePtr;
+            const Matrix* targetPosePtr = _targetPosePtr;
+            const Matrix& bindMatrix = sourcePosePtr[sourceIndex];
+            const Matrix& targetMatrix = targetPosePtr[targetIndex];
+            Matrix inverseParentMatrix;
+            if (targetNode.ParentIndex != -1)
+                Matrix::Invert(targetPosePtr[targetNode.ParentIndex], inverseParentMatrix);
+            else
+                inverseParentMatrix = Matrix::Identity;
+
+            // Target node animation is world-space difference of the animated source node inside the target's parent node world-space
+            const SkeletonNode& sourceNode = _sourceSkeleton->Nodes.Get()[sourceIndex];
+            Matrix localMatrix = source.GetWorld();
+            if (sourceNode.ParentIndex != -1)
+                localMatrix = localMatrix * sourcePosePtr[sourceNode.ParentIndex];
+            localMatrix = Matrix::Invert(bindMatrix) * localMatrix;
+            localMatrix = targetMatrix * localMatrix * inverseParentMatrix;
+
+            // Extract local node transformation
+            localMatrix.Decompose(target);
         }
-        targetNodes[targetIndex] = node;
     }
+
+    FORCE_INLINE void RetargetPose(const Transform* sourceNodes, Transform* targetNodes)
+    {
+        for (int32 targetIndex = 0; targetIndex < _targetSkeleton->Nodes.Count(); targetIndex++)
+        {
+            const int32 sourceIndex = _sourceMapping->NodesMapping.Get()[targetIndex];
+            RetargetNode(sourceNodes[sourceIndex], targetNodes[targetIndex], sourceIndex, targetIndex);
+        }
+    }
+};
+
+void RetargetSkeletonPose(const SkeletonData& sourceSkeleton, const SkeletonData& targetSkeleton, const SkinnedModel::SkeletonMapping& mapping, const Transform* sourceNodes, Transform* targetNodes)
+{
+    Retargeting retargeting;
+    retargeting.Init(sourceSkeleton, targetSkeleton, mapping);
+    retargeting.RetargetPose(sourceNodes, targetNodes);
 }
 
 AnimGraphTraceEvent& AnimGraphContext::AddTraceEvent(const AnimGraphNode* node)
@@ -431,9 +430,13 @@ void AnimGraphExecutor::ProcessAnimation(AnimGraphImpulse* nodes, AnimGraphNode*
     const bool weighted = weight < 1.0f;
     const bool retarget = mapping.SourceSkeleton && mapping.SourceSkeleton != mapping.TargetSkeleton;
     const auto emptyNodes = GetEmptyNodes();
+    Retargeting retargeting;
     SkinnedModel::SkeletonMapping sourceMapping;
     if (retarget)
+    {
         sourceMapping = _graph.BaseModel->GetSkeletonMapping(mapping.SourceSkeleton);
+        retargeting.Init(mapping.SourceSkeleton->Skeleton, mapping.TargetSkeleton->Skeleton, mapping);
+    }
     for (int32 nodeIndex = 0; nodeIndex < nodes->Nodes.Count(); nodeIndex++)
     {
         const int32 nodeToChannel = mapping.NodesMapping[nodeIndex];
@@ -447,7 +450,8 @@ void AnimGraphExecutor::ProcessAnimation(AnimGraphImpulse* nodes, AnimGraphNode*
             // Optionally retarget animation into the skeleton used by the Anim Graph
             if (retarget)
             {
-                RetargetSkeletonNode(mapping.SourceSkeleton->Skeleton, mapping.TargetSkeleton->Skeleton, sourceMapping, srcNode, nodeIndex);
+                const int32 sourceIndex = sourceMapping.NodesMapping[nodeIndex];
+                retargeting.RetargetNode(srcNode, srcNode, sourceIndex, nodeIndex);
             }
 
             // Mark node as used
@@ -958,6 +962,21 @@ void AnimGraphExecutor::ProcessGroupParameters(Box* box, Node* node, Value& valu
         }
         break;
     }
+    // Set Parameter
+    case 5:
+    {
+        // Set parameter value
+        int32 paramIndex;
+        const auto param = _graph.GetParameter((Guid)node->Values[0], paramIndex);
+        if (param)
+        {
+            context.Data->Parameters[paramIndex].Value = tryGetValue(node->GetBox(1), 1, Value::Null);
+        }
+
+        // Pass over the pose
+        value = tryGetValue(node->GetBox(2), Value::Null);
+        break;
+    }
     default:
         break;
     }
@@ -1194,18 +1213,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         // [Deprecated on 13.05.2020, expires on 13.05.2021]
         // Get input
         auto input = tryGetValue(node->GetBox(1), Value::Null);
-        const auto nodes = node->GetNodes(this);
-        if (ANIM_GRAPH_IS_VALID_PTR(input))
-        {
-            // Use input nodes
-            CopyNodes(nodes, input);
-        }
-        else
-        {
-            // Use default nodes
-            InitNodes(nodes);
-            input = nodes;
-        }
+        const auto nodes = node->GetNodes(this, input);
 
         // Fetch the settings
         const auto srcBoneIndex = (int32)node->Values[0];
@@ -2202,18 +2210,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
     {
         // Get input
         auto input = tryGetValue(node->GetBox(1), Value::Null);
-        const auto nodes = node->GetNodes(this);
-        if (ANIM_GRAPH_IS_VALID_PTR(input))
-        {
-            // Use input nodes
-            CopyNodes(nodes, input);
-        }
-        else
-        {
-            // Use default nodes
-            InitNodes(nodes);
-            input = nodes;
-        }
+        const auto nodes = node->GetNodes(this, input);
 
         // Fetch the settings
         const auto srcNodeIndex = node->Data.CopyNode.SrcNodeIndex;
@@ -2267,22 +2264,10 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         float weight = (float)tryGetValue(node->GetBox(3), node->Values[1]);
         if (nodeIndex < 0 || nodeIndex >= _skeletonNodesCount || weight < ANIM_GRAPH_BLEND_THRESHOLD)
         {
-            // Pass through the input
             value = input;
             break;
         }
-        const auto nodes = node->GetNodes(this);
-        if (ANIM_GRAPH_IS_VALID_PTR(input))
-        {
-            // Use input nodes
-            CopyNodes(nodes, input);
-        }
-        else
-        {
-            // Use default nodes
-            InitNodes(nodes);
-            input = nodes;
-        }
+        const auto nodes = node->GetNodes(this, input);
         const Vector3 target = (Vector3)tryGetValue(node->GetBox(2), Vector3::Zero);
         weight = Math::Saturate(weight);
 
@@ -2324,22 +2309,10 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         float weight = (float)tryGetValue(node->GetBox(4), node->Values[1]);
         if (nodeIndex < 0 || nodeIndex >= _skeletonNodesCount || weight < ANIM_GRAPH_BLEND_THRESHOLD)
         {
-            // Pass through the input
             value = input;
             break;
         }
-        const auto nodes = node->GetNodes(this);
-        if (ANIM_GRAPH_IS_VALID_PTR(input))
-        {
-            // Use input nodes
-            CopyNodes(nodes, input);
-        }
-        else
-        {
-            // Use default nodes
-            InitNodes(nodes);
-            input = nodes;
-        }
+        const auto nodes = node->GetNodes(this, input);
         const Vector3 target = (Vector3)tryGetValue(node->GetBox(2), Vector3::Zero);
         const Vector3 jointTarget = (Vector3)tryGetValue(node->GetBox(3), Vector3::Zero);
         const bool allowStretching = (bool)tryGetValue(node->GetBox(5), node->Values[2]);
@@ -2539,6 +2512,174 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
             *(Float4*)bucket.Data = (Float4)tryGetValue(node->GetBox(1), Value::Zero);
         }
         value = *(Float4*)bucket.Data;
+        break;
+    }
+    // Spring Bone Physics
+    case 35:
+    {
+        // Get bucket
+        auto& bucket = context.Data->State[node->BucketIndex].SpringBonePhysics;
+        Transform objectTransform = context.Data->GetObjectTransform();
+
+        // Get input
+        auto input = tryGetValue(node->GetBox(1), Value::Null);
+        const auto endNodeIndex = node->Data.TransformNode.NodeIndex;
+        float weight = (float)tryGetValue(node->GetBox(2), node->Values[2]);
+        if (endNodeIndex < 0 || endNodeIndex >= _skeletonNodesCount || weight < ANIM_GRAPH_BLEND_THRESHOLD)
+        {
+            value = input;
+            break;
+        }
+        const auto nodes = node->GetNodes(this, input);
+
+        // Get parameters
+        weight = Math::Min(weight, 1.0f);
+        float deltaTime = context.DeltaTime;
+        int32 nodesCount = Math::Clamp((int32)node->Values[1] + 1, 1, _skeletonNodesCount);
+        float stiffness = (float)tryGetValue(node->GetBox(3), node->Values[3]);
+        float drag = (float)tryGetValue(node->GetBox(4), node->Values[4]);
+        float stretchLimit = (float)tryGetValue(node->GetBox(5), node->Values[5]) + 1.0f;
+        float gravityScale = (float)tryGetValue(node->GetBox(6), node->Values[6]);
+        Vector3 force = (Vector3)tryGetValue(node->GetBox(7), node->Values[7]) + Physics::GetGravity() * gravityScale;
+
+        // Get world-space transforms of the nodes (from root to end)
+        Array<int32, InlinedAllocation<8>> nodesIndices;
+        Array<Transform, InlinedAllocation<8>> nodesRef;
+        nodesIndices.Resize(nodesCount);
+        nodesRef.Resize(nodesCount);
+        auto& skeleton = _graph.BaseModel->Skeleton;
+        for (int32 i = nodesCount - 1, nodeIndex = endNodeIndex; i >= 0; i--)
+        {
+            nodesIndices[i] = nodeIndex;
+            nodeIndex = skeleton.Nodes[nodeIndex].ParentIndex;
+        }
+        nodesRef[0] = nodes->GetNodeWorldTransformation(context, skeleton, nodesIndices[0]); // Root comes from animation (incl. animated model movement)
+        for (int32 i = 1; i < nodesCount; i++)
+            nodesRef[i] = nodesRef[i - 1].LocalToWorld(nodes->Nodes[nodesIndices[i]]);
+
+        // Check if we reset the simulation (start from the reference pose)
+        bool reset = bucket.LastUpdateFrame < context.CurrentFrameIndex - 1 || context.CurrentFrameIndex == 1;
+        if (bucket.StateDataStart == -1)
+        {
+            // Allocate a dynamic state
+            bucket.StateDataStart = context.Data->DynamicState.Count();
+            context.Data->DynamicState.AddUninitialized(sizeof(AnimGraphInstanceData::SpringBonePhysicsDynamic) * nodesCount);
+            reset = true;
+        }
+        auto* dynamic = (AnimGraphInstanceData::SpringBonePhysicsDynamic*)&context.Data->DynamicState[bucket.StateDataStart];
+        if (reset)
+        {
+            // Initialize the simulation from the reference pose
+            for (int32 i = 0; i < nodesCount; i++)
+                dynamic[i].CurrentPosition = dynamic[i].PreviousPosition = nodesRef[i].Translation;
+        }
+        bucket.LastUpdateFrame = context.CurrentFrameIndex;
+
+        // Move each node by velocity and forces
+        dynamic[0].PreviousPosition = dynamic[0].CurrentPosition;
+        dynamic[0].CurrentPosition = nodesRef[0].Translation;
+        for (int32 i = 1; i < nodesCount; i++)
+        {
+            Vector3 position = dynamic[i].CurrentPosition;
+            Vector3 prevPosition = dynamic[i].PreviousPosition;
+            Vector3 refPosition = nodesRef[i].Translation;
+
+            // Stiffness force
+            Vector3 delta = (refPosition - position) * stiffness;
+
+            // Gravity and wind forces
+            delta += force * (deltaTime * deltaTime);
+
+            // Verlet integration
+            delta += (position - prevPosition) * (1 - drag);
+
+            dynamic[i].PreviousPosition = position;
+            dynamic[i].CurrentPosition = position + delta;
+        }
+
+        // Length constraints
+        for (int32 i = 1; i < nodesCount; i++)
+        {
+            Vector3 offset = dynamic[i].CurrentPosition - dynamic[i - 1].CurrentPosition;
+            Real dist = offset.Length();
+            Real boneLength = Vector3::Distance(nodesRef[i].Translation, nodesRef[i - 1].Translation);
+            Real maxBoneLength = boneLength * stretchLimit;
+            if (dist > maxBoneLength && dist > ANIM_GRAPH_BLEND_THRESHOLD)
+            {
+                Real scale = ((dist - maxBoneLength) / dist);
+                dynamic[i].CurrentPosition -= offset * scale;
+            }
+        }
+
+        // Update the nodes with the new transforms (move back from world-space to node-space)
+        Quaternion prevRotation = Quaternion::Identity;
+        for (int32 i = 0; i < nodesCount; i++)
+        {
+            Transform nodeTransform = nodesRef[i];
+            nodeTransform.Translation = dynamic[i].CurrentPosition;
+
+            // Move back from world-space to model-space
+            nodeTransform = objectTransform.WorldToLocal(nodeTransform);
+
+            if (i + 1 < nodesCount)
+            {
+                // Orient node to point to the next node in the chain
+                Vector3 childNewPos = objectTransform.WorldToLocal(dynamic[i + 1].CurrentPosition);
+                int32 childIndex = nodesIndices[i + 1];
+                Vector3 childRefPos = nodes->Nodes[childIndex].Translation;
+                Vector3 childOldPos = nodeTransform.LocalToWorld(childRefPos);
+                Vector3 oldDir = (childOldPos - nodeTransform.Translation).GetNormalized();
+                Vector3 newDir = (childNewPos - nodeTransform.Translation).GetNormalized();
+                nodeTransform.Orientation = Quaternion::FindBetween(oldDir, newDir) * nodeTransform.Orientation;
+                prevRotation = nodeTransform.Orientation;
+            }
+            else
+            {
+                // Tip (last) node copies the orientation of the parent
+                nodeTransform.Orientation = prevRotation;
+            }
+
+            nodes->SetNodeModelTransformation(skeleton, nodesIndices[i], nodeTransform, weight);
+        }
+
+        // When we blend between animated and simulated poses then fetch the final pose from the nodes instead of using the simulated pose directly
+        if (weight < 1.0f)
+        {
+            // TODO: optimize it by getting root node, then using LocalToWorld for following children
+            for (int32 i = 1; i < nodesCount; i++)
+                dynamic[i].CurrentPosition = nodes->GetNodeWorldTransformation(context, skeleton, nodesIndices[i]).Translation;
+        }
+
+        value = nodes;
+        break;
+    }
+    // Per Instance Random
+    case 36:
+    {
+        auto* actor = ScriptingObject::Cast<Actor>(context.Data->Object);
+        value = actor ? actor->GetPerInstanceRandom() : 0.0f;
+        break;
+    }
+    // Instance Transform
+    case 37:
+    {
+        auto* actor = ScriptingObject::Cast<Actor>(context.Data->Object);
+        const auto& transform = actor ? actor->GetTransform() : Transform::Identity;
+        switch (box->ID)
+        {
+        case 0:
+            value = Value(transform);
+            break;
+        case 1:
+            value = transform.Translation;
+            break;
+        case 2:
+            value = transform.Orientation;
+            break;
+        case 3:
+            value = transform.Scale;
+            break;
+        }
         break;
     }
     default:

@@ -170,15 +170,14 @@ void CS_RasterizeHeightfield(uint3 DispatchThreadId : SV_DispatchThreadID)
 		// Convert voxel world-space position into heightfield local-space position and get heightfield UV
 		float4x4 worldToLocal = ToMatrix4x4(objectData.WorldToVolume);
 		float3 volumePos = mul(float4(voxelWorldPos, 1), worldToLocal).xyz;
-		float3 volumeUV = volumePos * objectData.VolumeToUVWMul + objectData.VolumeToUVWAdd;
-		float2 heightfieldUV = float2(volumeUV.x, volumeUV.z);
 
         // Sample heightfield around the voxel location (heightmap uses point sampler)
         Texture2D<float4> heightmap = ObjectsTextures[i];
         float4 localToUV = float4(objectData.VolumeToUVWMul.xz, objectData.VolumeToUVWAdd.xz);
+#if 1
         float3 n00, n10, n01, n11;
         bool h00, h10, h01, h11;
-        float offset = CascadeVoxelSize * 2;
+        float offset = CascadeVoxelSize;
         float3 p00 = SampleHeightmap(heightmap, volumePos + float3(-offset, 0, 0), localToUV, n00, h00, objectData.MipOffset);
         float3 p10 = SampleHeightmap(heightmap, volumePos + float3(+offset, 0, 0), localToUV, n10, h10, objectData.MipOffset);
         float3 p01 = SampleHeightmap(heightmap, volumePos + float3(0, 0, -offset), localToUV, n01, h01, objectData.MipOffset);
@@ -189,6 +188,11 @@ void CS_RasterizeHeightfield(uint3 DispatchThreadId : SV_DispatchThreadID)
         float3 heightfieldNormal = (n00 + n10 + n01 + n11) * 0.25f;
         heightfieldNormal = normalize(heightfieldNormal);
         bool isHole = h00 || h10 || h01 || h11;
+#else
+        float3 heightfieldNormal;
+        bool isHole;
+        float3 heightfieldPosition = SampleHeightmap(heightmap, volumePos, localToUV, heightfieldNormal, isHole, objectData.MipOffset);
+#endif
 
         // Skip holes and pixels outside the heightfield
 	    if (isHole)
@@ -311,26 +315,39 @@ float4 PS_Debug(Quad_VS2PS input) : SV_Target
 	float3 viewRay = lerp(lerp(ViewFrustumWorldRays[3], ViewFrustumWorldRays[0], input.TexCoord.x), lerp(ViewFrustumWorldRays[2], ViewFrustumWorldRays[1], input.TexCoord.x), 1 - input.TexCoord.y).xyz;
 	viewRay = normalize(viewRay - ViewWorldPos);
 	trace.Init(ViewWorldPos, viewRay, ViewNearPlane, ViewFarPlane);
-	trace.NeedsHitNormal = true;
 	GlobalSDFHit hit = RayTraceGlobalSDF(GlobalSDF, GlobalSDFTex, GlobalSDFMip, trace);
 
 	// Debug draw
-	float3 color = saturate(hit.StepsCount / 80.0f).xxx;
-	if (!hit.IsHit())
-		color.rg *= 0.4f;
-#if 0
-	else
-	{
+	float3 color = saturate(hit.StepsCount / 50.0f).xxx;
+	if (hit.IsHit())
+    {
+#if 1
+        float3 hitPosition = hit.GetHitPosition(trace);
+        float hitSDF;
+        float3 hitNormal = SampleGlobalSDFGradient(GlobalSDF, GlobalSDFTex, GlobalSDFMip, hitPosition, hitSDF, hit.HitCascade);
+#if 1
+        // Composite step count with SDF normals
+		//color.rgb *= saturate(normalize(hitNormal) * 0.5f + 0.7f) + 0.3f;
+		color = lerp(normalize(hitNormal) * 0.5f + 0.5f, 1 - color, saturate(hit.StepsCount / 80.0f));
+#else
 		// Debug draw SDF normals
-		color.rgb = normalize(hit.HitNormal) * 0.5f + 0.5f;
-	}
-#elif 1
+		color = normalize(hitNormal) * 0.5f + 0.5f;
+#endif
+#else
+        // Heatmap with step count
+        if (hit.StepsCount > 40)
+            color = float3(saturate(hit.StepsCount / 80.0f), 0, 0);
+        else if (hit.StepsCount > 20)
+            color = float3(saturate(hit.StepsCount / 40.0f).xx, 0);
+        else
+            color = float3(0, saturate(hit.StepsCount / 20.0f), 0);
+#endif
+    }
     else
     {
-        // Composite with SDF normals
-		color.rgb *= saturate(normalize(hit.HitNormal) * 0.5f + 0.7f) + 0.1f;
+        // Bluish sky
+		color.rg *= 0.4f;
     }
-#endif
 	return float4(color, 1);
 }
 

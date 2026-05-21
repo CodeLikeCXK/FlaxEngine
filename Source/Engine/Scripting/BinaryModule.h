@@ -23,7 +23,7 @@ struct ScriptingTypeMethodSignature
 
     StringAnsiView Name;
     VariantType ReturnType;
-    bool IsStatic;
+    bool IsStatic = false;
     Array<Param, InlinedAllocation<16>> Params;
 };
 
@@ -90,6 +90,11 @@ public:
     /// The scripting types cache that maps the full typename to the scripting type index. Build after adding the type to the assembly.
     /// </summary>
     Dictionary<StringAnsi, int32> TypeNameToTypeIndex;
+
+    /// <summary>
+    /// Determinates whether module can be hot-reloaded at runtime. For example, in Editor after scripts recompilation. Some modules such as engine and class library modules are static.
+    /// </summary>
+    bool CanReload;
 
 public:
 
@@ -317,7 +322,7 @@ public:
 #endif
 
     static ScriptingObject* ManagedObjectSpawn(const ScriptingObjectSpawnParams& params);
-    static MMethod* FindMethod(MClass* mclass, const ScriptingTypeMethodSignature& signature);
+    static MMethod* FindMethod(const MClass* mclass, const ScriptingTypeMethodSignature& signature);
 #if USE_CSHARP
     static ManagedBinaryModule* FindModule(const MClass* klass);
     static ScriptingTypeHandle FindType(const MClass* klass);

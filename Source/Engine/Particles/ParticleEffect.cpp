@@ -2,7 +2,6 @@
 
 #include "ParticleEffect.h"
 #include "Particles.h"
-#include "Engine/Core/Types/CommonValue.h"
 #include "Engine/Content/Deprecated.h"
 #include "Engine/Serialization/JsonTools.h"
 #include "Engine/Serialization/Serialization.h"
@@ -11,6 +10,10 @@
 #include "Engine/Level/Scene/Scene.h"
 #include "Engine/Engine/Time.h"
 #include "Engine/Engine/Engine.h"
+#if USE_EDITOR
+#include "Editor/Editor.h"
+#include "Editor/Managed/ManagedEditor.h"
+#endif
 
 ParticleEffect::ParticleEffect(const SpawnParams& params)
     : Actor(params)
@@ -465,7 +468,12 @@ void ParticleEffect::Update()
     if (UpdateMode == SimulationUpdateMode::FixedTimestep)
     {
         // Check if last simulation update was past enough to kick a new on
-        const float time = Time::Update.Time.GetTotalSeconds();
+        bool useTimeScale = UseTimeScale;
+#if USE_EDITOR
+        if (!Editor::IsPlayMode && IsDuringPlay())
+            useTimeScale = false;
+#endif
+        const float time = (useTimeScale ? Time::Update.Time : Time::Update.UnscaledTime).GetTotalSeconds();
         if (time - Instance.LastUpdateTime < FixedTimestep)
             return;
     }
@@ -474,9 +482,6 @@ void ParticleEffect::Update()
 }
 
 #if USE_EDITOR
-
-#include "Editor/Editor.h"
-#include "Editor/Managed/ManagedEditor.h"
 
 void ParticleEffect::UpdateExecuteInEditor()
 {
@@ -601,7 +606,9 @@ bool ParticleEffect::HasContentLoaded() const
 
 void ParticleEffect::Draw(RenderContext& renderContext)
 {
-    if (renderContext.View.Pass == DrawPass::GlobalSDF || renderContext.View.Pass == DrawPass::GlobalSurfaceAtlas)
+    if (renderContext.View.Pass == DrawPass::GlobalSDF || 
+        renderContext.View.Pass == DrawPass::GlobalSurfaceAtlas ||
+        EnumHasNoneFlags(renderContext.View.Flags, ViewFlags::Particles))
         return;
     _lastMinDstSqr = Math::Min(_lastMinDstSqr, Vector3::DistanceSquared(GetPosition(), renderContext.View.WorldPosition));
     RenderContextBatch renderContextBatch(renderContext);
@@ -610,10 +617,12 @@ void ParticleEffect::Draw(RenderContext& renderContext)
 
 void ParticleEffect::Draw(RenderContextBatch& renderContextBatch)
 {
+    const RenderView& mainView = renderContextBatch.GetMainContext().View;
+    if (EnumHasNoneFlags(mainView.Flags, ViewFlags::Particles))
+        return;
     Particles::DrawParticles(renderContextBatch, this);
 
     // Cull again against the main context (if using multiple ones) to skip caching draw distance from shadow projections
-    const RenderView& mainView = renderContextBatch.GetMainContext().View;
     const BoundingSphere bounds(_sphere.Center - mainView.Origin, _sphere.Radius);
     if (renderContextBatch.Contexts.Count() > 1 && !mainView.CullingFrustum.Intersects(bounds))
         return;
@@ -718,86 +727,39 @@ void ParticleEffect::Deserialize(DeserializeStream& stream, ISerializeModifier* 
     const auto overridesMember = stream.FindMember("Overrides");
     if (overridesMember != stream.MemberEnd())
     {
-        // [Deprecated on 25.11.2018, expires on 25.11.2022]
-        if (modifier->EngineBuild < 6197)
+        const auto& overrides = overridesMember->value;
+        CHECK(overrides.IsArray());
+        _parametersOverrides.EnsureCapacity(_parametersOverrides.Count() + overrides.Size());
+        for (rapidjson::SizeType i = 0; i < overrides.Size(); i++)
         {
-            PRAGMA_DISABLE_DEPRECATION_WARNINGS
-            MARK_CONTENT_DEPRECATED();
-            const auto& overrides = overridesMember->value;
-            ASSERT(overrides.IsArray());
-            _parametersOverrides.EnsureCapacity(_parametersOverrides.Count() + overrides.Size());
-            for (rapidjson::SizeType i = 0; i < overrides.Size(); i++)
+            auto& o = (DeserializeStream&)overrides[i];
+            const String trackName = JsonTools::GetString(o, "Track");
+            const Guid id = JsonTools::GetGuid(o, "Id");
+            ParameterOverride* e = nullptr;
+            for (auto& q : _parametersOverrides)
             {
-                const auto& o = (DeserializeStream&)overrides[i];
-                const String trackName = JsonTools::GetString(o, "Track");
-                const Guid id = JsonTools::GetGuid(o, "Id");
-                ParameterOverride* e = nullptr;
-                for (auto& q : _parametersOverrides)
+                if (q.Id == id && q.Track == trackName)
                 {
-                    if (q.Id == id && q.Track == trackName)
-                    {
-                        e = &q;
-                        break;
-                    }
-                }
-                if (e)
-                {
-                    // Update overriden parameter value
-                    CommonValue value;
-                    auto mValue = SERIALIZE_FIND_MEMBER(o, "Value");
-                    if (mValue != o.MemberEnd())
-                        e->Value = Variant(JsonTools::GetCommonValue(mValue->value));
-                }
-                else
-                {
-                    // Add parameter override
-                    auto& p = _parametersOverrides.AddOne();
-                    p.Track = trackName;
-                    p.Id = id;
-                    CommonValue value;
-                    auto mValue = SERIALIZE_FIND_MEMBER(o, "Value");
-                    if (mValue != o.MemberEnd())
-                        p.Value = Variant(JsonTools::GetCommonValue(mValue->value));
+                    e = &q;
+                    break;
                 }
             }
-            PRAGMA_ENABLE_DEPRECATION_WARNINGS
-        }
-        else
-        {
-            const auto& overrides = overridesMember->value;
-            ASSERT(overrides.IsArray());
-            _parametersOverrides.EnsureCapacity(_parametersOverrides.Count() + overrides.Size());
-            for (rapidjson::SizeType i = 0; i < overrides.Size(); i++)
+            if (e)
             {
-                auto& o = (DeserializeStream&)overrides[i];
-                const String trackName = JsonTools::GetString(o, "Track");
-                const Guid id = JsonTools::GetGuid(o, "Id");
-                ParameterOverride* e = nullptr;
-                for (auto& q : _parametersOverrides)
-                {
-                    if (q.Id == id && q.Track == trackName)
-                    {
-                        e = &q;
-                        break;
-                    }
-                }
-                if (e)
-                {
-                    // Update overriden parameter value
-                    const auto mValue = SERIALIZE_FIND_MEMBER(o, "Value");
-                    if (mValue != stream.MemberEnd())
-                        Serialization::Deserialize(mValue->value, e->Value, modifier);
-                }
-                else
-                {
-                    // Add parameter override
-                    auto& p = _parametersOverrides.AddOne();
-                    p.Track = trackName;
-                    p.Id = id;
-                    const auto mValue = SERIALIZE_FIND_MEMBER(o, "Value");
-                    if (mValue != stream.MemberEnd())
-                        Serialization::Deserialize(mValue->value, p.Value, modifier);
-                }
+                // Update overriden parameter value
+                const auto mValue = SERIALIZE_FIND_MEMBER(o, "Value");
+                if (mValue != stream.MemberEnd())
+                    Serialization::Deserialize(mValue->value, e->Value, modifier);
+            }
+            else
+            {
+                // Add parameter override
+                auto& p = _parametersOverrides.AddOne();
+                p.Track = trackName;
+                p.Id = id;
+                const auto mValue = SERIALIZE_FIND_MEMBER(o, "Value");
+                if (mValue != stream.MemberEnd())
+                    Serialization::Deserialize(mValue->value, p.Value, modifier);
             }
         }
     }

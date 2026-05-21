@@ -41,7 +41,7 @@ PACK_STRUCT(struct SpriteParticleVertex
 class SpriteParticleRenderer
 {
 public:
-    volatile int64 Ready = 0;
+    volatile intptr Ready = 0;
     GPUBuffer* VB = nullptr;
     GPUBuffer* IB = nullptr;
     const static int32 VertexCount = 4;
@@ -677,11 +677,10 @@ void CleanupGPUParticlesSorting()
     SAFE_DELETE_GPU_RESOURCE(GPUIndirectArgsBuffer);
 }
 
-void DrawEmittersGPU(RenderContextBatch& renderContextBatch)
+void DrawEmittersGPU(GPUContext* context, RenderContextBatch& renderContextBatch)
 {
     PROFILE_GPU_CPU_NAMED("DrawEmittersGPU");
     ScopeReadLock systemScope(Particles::SystemLocker);
-    GPUContext* context = GPUDevice::Instance->GetMainContext();
 
     // Count draws and sorting passes needed for resources allocation
     uint32 indirectArgsSize = 0;
@@ -1124,9 +1123,9 @@ void DrawEmitterGPU(RenderContextBatch& renderContextBatch, ParticleBuffer* buff
     if (GPUEmitterDraws.Count() == 0)
     {
         // The first emitter schedules the drawing of all batched draws
-        renderContextBatch.GetMainContext().List->AddDelayedDraw([](RenderContextBatch& renderContextBatch, int32 contextIndex)
+        renderContextBatch.GetMainContext().List->AddDelayedDraw([](GPUContext* context, RenderContextBatch& renderContextBatch, int32 renderContextIndex)
         {
-            DrawEmittersGPU(renderContextBatch);
+            DrawEmittersGPU(context, renderContextBatch);
         });
     }
     GPUEmitterDraws.Add({ buffer, drawCall, drawModes, staticFlags, bounds, renderModulesIndices, indirectArgsSize, sortOrder, sorting });
@@ -1703,7 +1702,7 @@ void ParticlesSystem::Job(int32 index)
         // Calculate new time position
         const float startTime = (float)track.AsEmitter.StartFrame / fps;
         const float durationTime = (float)track.AsEmitter.DurationFrames / fps;
-        const bool canSpawn = startTime <= instance.Time && instance.Time <= startTime + durationTime;
+        const bool canSpawn = startTime <= instance.Time && instance.Time <= startTime + durationTime && effect->CanSpawn;
 
         // Update instance data
         data.Sync(effect->Instance, particleSystem, track.AsEmitter.Index);

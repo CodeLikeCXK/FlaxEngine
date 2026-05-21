@@ -703,6 +703,8 @@ namespace Flax.Build.Bindings
                 else if (nativeType.EndsWith("[]"))
                 {
                     parameterMarshalType = $"MarshalUsing(typeof(FlaxEngine.Interop.ArrayMarshaller<,>))";
+                    if (!parameterInfo.IsOut && !parameterInfo.IsRef)
+                        parameterMarshalType += ", In"; // The usage of 'LibraryImportAttribute' does not follow recommendations. It is recommended to use explicit '[In]' and '[Out]' attributes on array parameters.
                 }
 
                 if (!string.IsNullOrEmpty(parameterMarshalType))
@@ -2427,7 +2429,7 @@ namespace Flax.Build.Bindings
             contents.AppendLine();
             contents.AppendLine($"[assembly: AssemblyTitle(\"{binaryModuleName}\")]");
             contents.AppendLine("[assembly: AssemblyDescription(\"\")]");
-            contents.AppendLine("[assembly: AssemblyConfiguration(\"\")]");
+            contents.AppendLine($"[assembly: AssemblyConfiguration(\"{buildData.Configuration}\")]");
             contents.AppendLine($"[assembly: AssemblyCompany(\"{project.Company}\")]");
             contents.AppendLine("[assembly: AssemblyProduct(\"FlaxEngine\")]");
             contents.AppendLine($"[assembly: AssemblyCopyright(\"{project.Copyright}\")]");
@@ -2437,6 +2439,7 @@ namespace Flax.Build.Bindings
             contents.AppendLine($"[assembly: Guid(\"{id:d}\")]");
             contents.AppendLine($"[assembly: AssemblyVersion(\"{project.Version}\")]");
             contents.AppendLine($"[assembly: AssemblyFileVersion(\"{project.Version}\")]");
+            contents.AppendLine($"[assembly: AssemblyInformationalVersion(\"{project.VersionControlInfo}\")]");
 #if USE_NETCORE
             contents.AppendLine("[assembly: DisableRuntimeMarshalling]");
 #endif

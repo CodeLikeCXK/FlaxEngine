@@ -15,6 +15,7 @@ class FLAXENGINE_API VideoPlayer : public Actor
 {
     DECLARE_SCENE_OBJECT(VideoPlayer);
     API_AUTO_SERIALIZATION();
+    friend class AudioBackendOAL;
 
 public:
     /// <summary>
@@ -171,6 +172,30 @@ public:
     API_PROPERTY() FORCE_INLINE VideoPlayer::States GetState() const
     {
         return _state;
+    }
+
+    /// <summary>
+    /// Gets the value that determines whether the video playback is playing.
+    /// </summary>
+    API_PROPERTY() FORCE_INLINE bool IsPlaying() const
+    {
+        return _state == States::Playing;
+    }
+
+    /// <summary>
+    /// Gets the value that determines whether the video playback is paused.
+    /// </summary>
+    API_PROPERTY() FORCE_INLINE bool IsPaused() const
+    {
+        return _state == States::Paused;
+    }
+
+    /// <summary>
+    /// Gets the value that determines whether the video playback is stopped.
+    /// </summary>
+    API_PROPERTY() FORCE_INLINE bool IsStopped() const
+    {
+        return _state == States::Stopped;
     }
 
     /// <summary>

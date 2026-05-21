@@ -164,9 +164,6 @@ public:
     NavigationService()
         : EngineService(TEXT("Navigation"), 60)
     {
-#if COMPILE_WITH_NAV_MESH_BUILDER
-        NavMeshBuilder::Init();
-#endif
     }
 
     bool Init() override;
@@ -180,7 +177,7 @@ NavigationService NavigationServiceInstance;
 
 void* dtAllocDefault(size_t size, dtAllocHint)
 {
-    PROFILE_MEM(Navigation);
+    PROFILE_MEM(NavigationMesh);
     return Allocator::Allocate(size);
 }
 
@@ -305,6 +302,11 @@ void NavigationSettings::Deserialize(DeserializeStream& stream, ISerializeModifi
 
 bool NavigationService::Init()
 {
+    PROFILE_MEM(Navigation);
+#if COMPILE_WITH_NAV_MESH_BUILDER
+    NavMeshBuilder::Init();
+#endif
+
     // Link memory allocation calls to use engine default allocator
     dtAllocSetCustom(dtAllocDefault, Allocator::Free);
     rcAllocSetCustom(rcAllocDefault, Allocator::Free);
@@ -381,30 +383,6 @@ bool Navigation::RayCast(const Vector3& startPosition, const Vector3& endPositio
         return false;
     return NavMeshes.First()->RayCast(startPosition, endPosition, hitInfo);
 }
-
-#if COMPILE_WITH_NAV_MESH_BUILDER
-
-bool Navigation::IsBuildingNavMesh()
-{
-    return NavMeshBuilder::IsBuildingNavMesh();
-}
-
-float Navigation::GetNavMeshBuildingProgress()
-{
-    return NavMeshBuilder::GetNavMeshBuildingProgress();
-}
-
-void Navigation::BuildNavMesh(Scene* scene, float timeoutMs)
-{
-    NavMeshBuilder::Build(scene, timeoutMs);
-}
-
-void Navigation::BuildNavMesh(Scene* scene, const BoundingBox& dirtyBounds, float timeoutMs)
-{
-    NavMeshBuilder::Build(scene, dirtyBounds, timeoutMs);
-}
-
-#endif
 
 #if COMPILE_WITH_DEBUG_DRAW
 

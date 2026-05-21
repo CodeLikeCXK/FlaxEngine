@@ -1,5 +1,6 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -17,40 +18,6 @@ namespace Flax.Deps.Dependencies
         private string root, nvCloth;
 
         /// <inheritdoc />
-        public override TargetPlatform[] Platforms
-        {
-            get
-            {
-                switch (BuildPlatform)
-                {
-                case TargetPlatform.Windows:
-                    return new[]
-                    {
-                        TargetPlatform.Windows,
-                        TargetPlatform.XboxOne,
-                        TargetPlatform.XboxScarlett,
-                        TargetPlatform.PS4,
-                        TargetPlatform.PS5,
-                        TargetPlatform.Switch,
-                        TargetPlatform.Android,
-                    };
-                case TargetPlatform.Linux:
-                    return new[]
-                    {
-                        TargetPlatform.Linux,
-                    };
-                case TargetPlatform.Mac:
-                    return new[]
-                    {
-                        TargetPlatform.Mac,
-                        TargetPlatform.iOS,
-                    };
-                default: return new TargetPlatform[0];
-                }
-            }
-        }
-
-        /// <inheritdoc />
         public override void Build(BuildOptions options)
         {
             root = options.IntermediateFolder;
@@ -59,41 +26,55 @@ namespace Flax.Deps.Dependencies
             // Get the source
             CloneGitRepoSingleBranch(root, "https://github.com/FlaxEngine/NvCloth.git", "master");
 
+            // Patch the CMakeLists.txt to support custom compilation flags
+            foreach (var os in new[] { "android", "ios", "linux", "mac", "windows", })
+            {
+                var filePath = Path.Combine(nvCloth, "compiler", "cmake", os, "CMakeLists.txt");
+                var appendLine = "SET(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} ${NVCLOTH_CXX_FLAGS}\")";
+                if (!File.ReadAllText(filePath).Contains(appendLine))
+                    File.AppendAllText(filePath, Environment.NewLine + appendLine + Environment.NewLine);
+            }
+
             foreach (var platform in options.Platforms)
             {
-                BuildStarted(platform);
-                switch (platform)
+                foreach (var architecture in options.Architectures)
                 {
-                case TargetPlatform.Windows:
-                    Build(options, platform, TargetArchitecture.x64);
-                    Build(options, platform, TargetArchitecture.ARM64);
-                    break;
-                case TargetPlatform.XboxOne:
-                case TargetPlatform.XboxScarlett:
-                    Build(options, platform, TargetArchitecture.x64);
-                    break;
-                case TargetPlatform.PS4:
-                case TargetPlatform.PS5:
-                    Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "NvCloth"), root, true, true);
-                    Build(options, platform, TargetArchitecture.x64);
-                    break;
-                case TargetPlatform.Switch:
-                    Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "NvCloth"), root, true, true);
-                    Build(options, platform, TargetArchitecture.ARM64);
-                    break;
-                case TargetPlatform.Android:
-                    Build(options, platform, TargetArchitecture.ARM64);
-                    break;
-                case TargetPlatform.Mac:
-                    Build(options, platform, TargetArchitecture.x64);
-                    Build(options, platform, TargetArchitecture.ARM64);
-                    break;
-                case TargetPlatform.iOS:
-                    Build(options, platform, TargetArchitecture.ARM64);
-                    break;
-                case TargetPlatform.Linux:
-                    Build(options, platform, TargetArchitecture.x64);
-                    break;
+                    BuildStarted(platform, architecture);
+                    switch (platform)
+                    {
+                    case TargetPlatform.Windows:
+                        Build(options, platform, architecture);
+                        break;
+                    case TargetPlatform.XboxOne:
+                    case TargetPlatform.XboxScarlett:
+                        Build(options, platform, TargetArchitecture.x64);
+                        break;
+                    case TargetPlatform.PS4:
+                    case TargetPlatform.PS5:
+                        Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "NvCloth"), root, true, true);
+                        Build(options, platform, TargetArchitecture.x64);
+                        break;
+                    case TargetPlatform.Switch:
+                        Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "NvCloth"), root, true, true);
+                        Build(options, platform, TargetArchitecture.ARM64);
+                        break;
+                    case TargetPlatform.Android:
+                        Build(options, platform, TargetArchitecture.ARM64);
+                        break;
+                    case TargetPlatform.Mac:
+                        Build(options, platform, architecture);
+                        break;
+                    case TargetPlatform.iOS:
+                        Build(options, platform, TargetArchitecture.ARM64);
+                        break;
+                    case TargetPlatform.Linux:
+                        Build(options, platform, architecture);
+                        break;
+                    case TargetPlatform.Web:
+                        Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "NvCloth"), root, true, true);
+                        Build(options, platform, TargetArchitecture.x86);
+                        break;
+                    }
                 }
             }
 
@@ -110,7 +91,7 @@ namespace Flax.Deps.Dependencies
             // Peek options
             var binariesPrefix = string.Empty;
             var binariesPostfix = string.Empty;
-            var cmakeArgs = "-DNV_CLOTH_ENABLE_DX11=0 -DNV_CLOTH_ENABLE_CUDA=0 -DPX_GENERATE_GPU_PROJECTS=0";
+            var cmakeArgs = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DNV_CLOTH_ENABLE_DX11=0 -DNV_CLOTH_ENABLE_CUDA=0 -DPX_GENERATE_GPU_PROJECTS=0";
             var cmakeName = string.Empty;
             var buildFolder = Path.Combine(nvCloth, "compiler", platform.ToString() + '_' + architecture.ToString());
             var envVars = new Dictionary<string, string>();
@@ -154,7 +135,7 @@ namespace Flax.Deps.Dependencies
                 }
                 break;
             case TargetPlatform.Mac:
-                cmakeArgs += " -DTARGET_BUILD_PLATFORM=mac";
+                cmakeArgs += " -DTARGET_BUILD_PLATFORM=mac -DNVCLOTH_CXX_FLAGS=\"-Wno-error=poison-system-directories -Wno-error=missing-include-dirs\"";
                 cmakeName = "mac";
                 binariesPrefix = "lib";
                 break;
@@ -164,11 +145,22 @@ namespace Flax.Deps.Dependencies
                 binariesPrefix = "lib";
                 break;
             case TargetPlatform.Linux:
-                cmakeArgs += " -DTARGET_BUILD_PLATFORM=linux";
+                cmakeArgs += " -DTARGET_BUILD_PLATFORM=linux -DNVCLOTH_CXX_FLAGS=\"-Wno-error=poison-system-directories -Wno-error=missing-include-dirs\"";
                 cmakeName = "linux";
                 binariesPrefix = "lib";
-                envVars.Add("CC", "clang-" + Configuration.LinuxClangMinVer);
-                envVars.Add("CXX", "clang++-" + Configuration.LinuxClangMinVer);
+                envVars.Add("CC", "clang-" + LinuxConfiguration.ClangMinVer);
+                envVars.Add("CXX", "clang++-" + LinuxConfiguration.ClangMinVer);
+                break;
+            case TargetPlatform.Web:
+                cmakeArgs += " -DTARGET_BUILD_PLATFORM=web";
+                cmakeArgs += $" -DCMAKE_TOOLCHAIN_FILE=\"{EmscriptenSdk.Instance.CMakeToolchainPath}\"";
+                if (WebConfiguration.Threads)
+                    cmakeArgs += " -DNVCLOTH_CXX_FLAGS=\"-pthread\"";
+                cmakeName = "web";
+                binariesPrefix = "lib";
+
+                // Disable SIMD and fix missing symbols during linking
+                Utilities.ReplaceInFile(Path.Combine(nvCloth, "src/NvSimd/NvSimdTypes.h"), "(__x86_64__) || PX_EMSCRIPTEN", "(__x86_64__) // || PX_EMSCRIPTEN");
                 break;
             default: throw new InvalidPlatformException(platform);
             }
@@ -192,13 +184,15 @@ namespace Flax.Deps.Dependencies
             Log.Info($"Building {File.ReadAllLines(Path.Combine(root, "README.md"))[0].Trim()} to {platform} {architecture}");
 
             // Generate project files
+            var config = "Release";
             SetupDirectory(buildFolder, false);
+            SetupDirectory(Path.Combine(root, "PxShared/src/foundation/include"), false);
             Utilities.FileDelete(Path.Combine(cmakeFolder, "CMakeCache.txt"));
             cmakeArgs += $" -DPX_STATIC_LIBRARIES=1 -DPX_OUTPUT_DLL_DIR=\"{Path.Combine(buildFolder, "bin")}\" -DPX_OUTPUT_LIB_DIR=\"{Path.Combine(buildFolder, "lib")}\" -DPX_OUTPUT_EXE_DIR=\"{Path.Combine(buildFolder, "bin")}\"";
-            RunCmake(cmakeFolder, platform, architecture, " -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF " + cmakeArgs, envVars);
+            RunCmake(cmakeFolder, platform, architecture, $" -DCMAKE_BUILD_TYPE={config} -DBUILD_SHARED_LIBS=OFF " + cmakeArgs, envVars);
 
             // Run build
-            BuildCmake(cmakeFolder, envVars);
+            BuildCmake(cmakeFolder, config, envVars);
 
             // Deploy binaries
             var libs = new[]

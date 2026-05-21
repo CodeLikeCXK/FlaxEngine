@@ -3,12 +3,16 @@
 #pragma once
 
 #include "Engine/Scripting/ScriptingType.h"
+#ifndef _MSC_VER
+#include "Engine/Core/Collections/Array.h"
+#endif
 #include "AssetInfo.h"
 #include "Asset.h"
 #include "Config.h"
 
 class Engine;
 class FlaxFile;
+class BinaryAsset;
 class IAssetFactory;
 class AssetsCache;
 
@@ -122,7 +126,26 @@ public:
     /// Gets the assets (loaded or during load).
     /// </summary>
     /// <returns>The collection of assets.</returns>
-    static Array<Asset*, HeapAllocation> GetAssets();
+    API_FUNCTION() static Array<Asset*, HeapAllocation> GetAssets();
+
+    /// <summary>
+    /// Gets the assets (loaded or during load).
+    /// </summary>
+    /// <param name="type">Type of the assets to search for. Includes any assets derived from the type.</param>
+    /// <returns>Found actors list.</returns>
+    API_FUNCTION() static Array<Asset*, HeapAllocation> GetAssets(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type);
+
+    /// <summary>
+    /// Gets the assets (loaded or during load).
+    /// </summary>
+    /// <typeparam name="T">Type of the object.</typeparam>
+    /// <returns>Found actors list.</returns>
+    template<typename T>
+    static Array<T*, HeapAllocation> GetAssets()
+    {
+        Array<Asset*, HeapAllocation> assets = GetAssets(T::GetStaticClass());
+        return *(Array<T*, HeapAllocation>*) & assets;
+    }
 
     /// <summary>
     /// Gets the raw dictionary of assets (loaded or during load).
@@ -284,6 +307,12 @@ public:
     /// </summary>
     /// <param name="asset">The asset.</param>
     API_FUNCTION() static void DeleteAsset(Asset* asset);
+    
+    /// <summary>
+    /// Deletes the script item at the specified path.
+    /// </summary>
+    /// <param name="path">The script path.</param>
+    API_FUNCTION() static void DeleteScript(const StringView& path);
 
     /// <summary>
     /// Deletes the asset at the specified path.
@@ -367,7 +396,13 @@ private:
     static void onAssetLoaded(Asset* asset);
     static void onAssetUnload(Asset* asset);
     static void onAssetChangeId(Asset* asset, const Guid& oldId, const Guid& newId);
-    static void deleteFileSafety(const StringView& path, const Guid& id);
+#if USE_EDITOR
+    friend BinaryAsset;
+    friend class ContentService;
+    static void onAssetDepend(BinaryAsset* asset, const Guid& otherId);
+    static void onAddDependencies(Asset* asset);
+#endif
+    static void deleteFileSafety(const StringView& path, const Guid* id = nullptr);
 
     // Internal bindings
 #if !COMPILE_WITHOUT_CSHARP

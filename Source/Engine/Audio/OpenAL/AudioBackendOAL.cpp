@@ -14,6 +14,9 @@
 #include "Engine/Audio/AudioListener.h"
 #include "Engine/Audio/AudioSource.h"
 #include "Engine/Audio/AudioSettings.h"
+#include "Engine/Content/Content.h"
+#include "Engine/Level/Level.h"
+#include "Engine/Video/VideoPlayer.h"
 
 // Include OpenAL library
 // Source: https://github.com/kcat/openal-soft
@@ -73,6 +76,7 @@ namespace ALC
     ALCdevice* Device = nullptr;
     ALCcontext* Context = nullptr;
     AudioBackend::FeatureFlags Features = AudioBackend::FeatureFlags::None;
+    bool Inited = false;
     CriticalSection Locker;
     Dictionary<uint32, SourceData> SourcesData;
 
@@ -132,7 +136,11 @@ namespace ALC
         {
             ASSERT_LOW_LAYER(sourceID == 0);
             alGenSources(1, &sourceID);
-            ASSERT_LOW_LAYER(sourceID != 0);
+            if (sourceID == 0)
+            {
+                ALC_CHECK_ERROR(alGenSources);
+                return;
+            }
 
             alSourcef(sourceID, AL_GAIN, volume);
             alSourcef(sourceID, AL_PITCH, pitch);
@@ -164,34 +172,46 @@ namespace ALC
         float Time;
     };
 
-    void RebuildContext(const Array<AudioSourceState>& states)
+    void RebuildContext()
     {
-        LOG(Info, "Rebuilding audio contexts");
-
         ClearContext();
-
         if (Device == nullptr)
             return;
 
+#if PLATFORM_WEB
+        ALCint* attrList = nullptr;
+#else
         ALCint attrList[] = { ALC_HRTF_SOFT, ALC_FALSE };
         if (Audio::GetEnableHRTF())
         {
             LOG(Info, "Enabling OpenAL HRTF");
             attrList[1] = ALC_TRUE; 
         }
+#endif
 
         Context = alcCreateContext(Device, attrList);
+        if (Context == nullptr)
+        {
+            LOG(Error, "Failed to create OpenAL context.");
+            return;
+        }
         alcMakeContextCurrent(Context);
-
+    }
+    
+    void RebuildListeners()
+    {
         for (AudioListener* listener : Audio::Listeners)
             Listener::Rebuild(listener);
-
+    }
+    
+    void RebuildSources(const Array<AudioSourceState>& states)
+    {
         for (int32 i = 0; i < states.Count(); i++)
         {
             AudioSource* source = Audio::Sources[i];
             Source::Rebuild(source->SourceID, source->GetPosition(), source->GetOrientation(), source->GetVolume(), source->GetPitch(), source->GetPan(), source->GetIsLooping() && !source->UseStreaming(), source->Is3D(), source->GetAttenuation(), source->GetMinDistance(), source->GetDopplerFactor());
 
-            if (states.HasItems())
+            if (states.HasItems() && source->SourceID)
             {
                 // Restore playback state
                 auto& state = states[i];
@@ -203,6 +223,13 @@ namespace ALC
                     source->SetTime(state.Time);
             }
         }
+    }
+
+    void RebuildContext(const Array<AudioSourceState>& states)
+    {
+        RebuildContext();
+        RebuildListeners();
+        RebuildSources(states);
     }
 
     void RebuildContext(bool isChangingDevice)
@@ -323,18 +350,18 @@ void AudioBackendOAL::Listener_ReinitializeAll()
 uint32 AudioBackendOAL::Source_Add(const AudioDataInfo& format, const Vector3& position, const Quaternion& orientation, float volume, float pitch, float pan, bool loop, bool spatial, float attenuation, float minDistance, float doppler)
 {
     PROFILE_MEM(Audio);
-
     uint32 sourceID = 0;
     ALC::Source::Rebuild(sourceID, position, orientation, volume, pitch, pan, loop, spatial, attenuation, minDistance, doppler);
-
-    // Cache audio data format assigned on source (used in Source_GetCurrentBufferTime)
-    ALC::Locker.Lock();
-    auto& data = ALC::SourcesData[sourceID];
-    data.Format = format;
-    data.Spatial = spatial;
-    data.Pan = pan;
-    ALC::Locker.Unlock();
-
+    if (sourceID)
+    {
+        // Cache audio data format assigned on source (used in Source_GetCurrentBufferTime)
+        ALC::Locker.Lock();
+        auto& data = ALC::SourcesData[sourceID];
+        data.Format = format;
+        data.Spatial = spatial;
+        data.Pan = pan;
+        ALC::Locker.Unlock();
+    }
     return sourceID;
 }
 
@@ -400,7 +427,7 @@ void AudioBackendOAL::Source_IsLoopingChanged(uint32 sourceID, bool loop)
 void AudioBackendOAL::Source_SpatialSetupChanged(uint32 sourceID, bool spatial, float attenuation, float minDistance, float doppler)
 {
     ALC::Locker.Lock();
-    const bool pan = ALC::SourcesData[sourceID].Spatial;
+    const float pan = ALC::SourcesData[sourceID].Pan;
     ALC::Locker.Unlock();
     if (spatial)
     {
@@ -629,7 +656,15 @@ AudioBackend::FeatureFlags AudioBackendOAL::Base_Features()
 
 void AudioBackendOAL::Base_OnActiveDeviceChanged()
 {
+    PROFILE_CPU();
     PROFILE_MEM(Audio);
+
+    // Fast-path on startup
+    if (!ALC::Inited && ALC::Device)
+    {
+        ALC::RebuildContext();
+        return;
+    }
 
     // Cleanup
     Array<ALC::AudioSourceState> states;
@@ -659,9 +694,53 @@ void AudioBackendOAL::Base_OnActiveDeviceChanged()
         LOG(Fatal, "Failed to open OpenAL device ({0}).", String(name));
         return;
     }
+    if (ALC::Inited)
+        LOG(Info, "Changed audio device to: {}", String(Audio::GetActiveDevice()->Name));
 
-    // Setup
-    ALC::RebuildContext(states);
+    // Rebuild context
+    ALC::RebuildContext();
+    if (ALC::Inited)
+    {
+        // Reload all audio clips to recreate their buffers
+        for (AudioClip* audioClip : Content::GetAssets<AudioClip>())
+        {
+            audioClip->WaitForLoaded();
+            ScopeLock lock(audioClip->Locker);
+
+            // Clear old buffer IDs
+            for (uint32& bufferID : audioClip->Buffers)
+                bufferID = 0;
+
+            if (audioClip->IsStreamable())
+            {
+                // Let the streaming recreate missing buffers
+                audioClip->RequestStreamingUpdate();
+            }
+            else
+            {
+                // Reload audio clip
+                auto assetLock = audioClip->Storage->Lock();
+                audioClip->LoadChunk(0);
+                audioClip->Buffers[0] = AudioBackend::Buffer::Create();
+                audioClip->WriteBuffer(0);
+
+            }
+        }
+
+        // Reload all videos to recreate their buffers
+        for (VideoPlayer* videoPlayer : Level::GetActors<VideoPlayer>(true))
+        {
+            VideoBackendPlayer& player = videoPlayer->_player;
+
+            // Clear audio state
+            for (uint32& bufferID : player.AudioBuffers)
+                bufferID = 0;
+            player.NextAudioBuffer = 0;
+            player.AudioSource = 0;
+        }
+    }
+    ALC::RebuildListeners();
+    ALC::RebuildSources(states);
 }
 
 void AudioBackendOAL::Base_SetDopplerFactor(float value)
@@ -729,7 +808,6 @@ bool AudioBackendOAL::Base_Init()
 
             devicesStr += (device.InternalName.Length() + 1) * sizeof(ALCchar);
         }
-
         if (activeDeviceIndex == -1)
         {
             LOG(Warning, "Failed to pick a default device");
@@ -770,18 +848,22 @@ bool AudioBackendOAL::Base_Init()
     }
 
     // Init
-    Base_SetDopplerFactor(AudioSettings::Get()->DopplerFactor);
     alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED); // Default attenuation model
-    int32 clampedIndex = Math::Clamp(activeDeviceIndex, -1, Audio::Devices.Count() - 1);
-    if (clampedIndex == Audio::GetActiveDeviceIndex())
+    if (Audio::GetActiveDeviceIndex() == Math::Clamp(activeDeviceIndex, -1, Audio::Devices.Count() - 1))
     {
-        ALC::RebuildContext(true);
+        // Manually create context if SetActiveDeviceIndex won't call it
+        Base_OnActiveDeviceChanged();
     }
     Audio::SetActiveDeviceIndex(activeDeviceIndex);
 #ifdef AL_SOFT_source_spatialize
     if (ALC::IsExtensionSupported("AL_SOFT_source_spatialize"))
         ALC::Features = EnumAddFlags(ALC::Features, FeatureFlags::SpatialMultiChannel);
 #endif
+#if !PLATFORM_WEB
+    ALC::Features = EnumAddFlags(ALC::Features, FeatureFlags::HRTF);
+#endif
+    Base_SetDopplerFactor(AudioSettings::Get()->DopplerFactor);
+    ALC::Inited = true;
 
     // Log service info
     LOG(Info, "{0} ({1})", String(alGetString(AL_RENDERER)), String(alGetString(AL_VERSION)));

@@ -12,25 +12,25 @@
 
 bool FileSystemBase::ShowOpenFileDialog(Window* parentWindow, const StringView& initialDirectory, const StringView& filter, bool multiSelect, const StringView& title, Array<String, HeapAllocation>& filenames)
 {
-    // No supported
+    // Not supported
     return true;
 }
 
 bool FileSystemBase::ShowSaveFileDialog(Window* parentWindow, const StringView& initialDirectory, const StringView& filter, bool multiSelect, const StringView& title, Array<String, HeapAllocation>& filenames)
 {
-    // No supported
+    // Not supported
     return true;
 }
 
 bool FileSystemBase::ShowBrowseFolderDialog(Window* parentWindow, const StringView& initialDirectory, const StringView& title, String& path)
 {
-    // No supported
+    // Not supported
     return true;
 }
 
 bool FileSystemBase::ShowFileExplorer(const StringView& path)
 {
-    // No supported
+    // Not supported
     return true;
 }
 
@@ -244,11 +244,11 @@ bool FileSystemBase::CopyDirectory(const String& dst, const String& src, bool wi
     return !FileSystem::DirectoryExists(*src) || FileSystemBase::DirectoryCopyHelper(dst, src, withSubDirectories);
 }
 
-uint64 FileSystemBase::GetDirectorySize(const StringView& path)
+uint64 FileSystemBase::GetDirectorySize(const StringView& path, const Char* searchPattern, DirectorySearchOption option)
 {
     uint64 result = 0;
     Array<String> files;
-    FileSystem::DirectoryGetFiles(files, path);
+    FileSystem::DirectoryGetFiles(files, path, searchPattern, option);
     for (const String& file : files)
         result += FileSystem::GetFileSize(file);
     return result;

@@ -1029,7 +1029,7 @@ void InvokeObjectReplication(NetworkReplicatedObject& item, uint32 ownerFrame, b
     }
 
     // Speed up replication of client-owned objects to other clients from server to reduce lag (data has to go from client to server and then to other clients)
-    if (NetworkManager::IsServer())
+    if (NetworkManager::IsServer() || NetworkManager::IsHost())
         DirtyObjectImpl(item, obj);
 }
 
@@ -1863,7 +1863,7 @@ void NetworkInternal::NetworkReplicatorClientConnected(NetworkClient* client)
         {
             auto& item = it->Item;
             ScriptingObject* obj = item.Object.Get();
-            if (!obj || !item.Spawned || item.Role != NetworkObjectRole::OwnedAuthoritative)
+            if (!obj || item.Role != NetworkObjectRole::OwnedAuthoritative)
                 continue;
 
             // Mark this client as missing cached data
@@ -2147,7 +2147,7 @@ void NetworkInternal::NetworkReplicatorUpdate()
                 Objects.Remove(it);
                 continue;
             }
-            if (item.Role != NetworkObjectRole::OwnedAuthoritative)
+            if (item.Role != NetworkObjectRole::OwnedAuthoritative && NetworkManager::IsClient())
                 continue; // Send replication messages of only owned objects or from other client objects
             CachedReplicationResult->AddObject(obj);
         }

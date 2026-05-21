@@ -34,9 +34,11 @@ private:
 
     int32 _isLoaded : 1;
     int32 _isLoading : 1;
+    int32 _canReload : 1;
     mutable int32 _hasCachedClasses : 1;
 
     mutable ClassesDictionary _classes;
+    mutable ClassesDictionary _typeClasses;
 
     int32 _reloadCount;
     StringAnsi _name;
@@ -123,6 +125,14 @@ public:
     FORCE_INLINE bool IsLoaded() const
     {
         return _isLoaded != 0;
+    }
+
+    /// <summary>
+    /// Returns true if assembly can be hot-reloaded at runtime. For example, in Editor after scripts recompilation. Some assemblies such as engine and class library modules are static.
+    /// </summary>
+    FORCE_INLINE bool CanReload() const
+    {
+        return USE_EDITOR && _canReload;
     }
 
     /// <summary>
@@ -224,6 +234,11 @@ public:
     /// Gets the classes lookup cache. Performs full initialization if not cached. The result cache contains all classes from the assembly.
     /// </summary>
     const ClassesDictionary& GetClasses() const;
+
+    /// <summary>
+    /// Gets the classes lookup cache that includes runtime-cached types. Non-stable to iterate over due to dynamic types caching.
+    /// </summary>
+    ClassesDictionary& GetTypeClasses() const;
 
 private:
     bool LoadCorlib();

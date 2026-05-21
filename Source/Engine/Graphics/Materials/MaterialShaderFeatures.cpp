@@ -10,9 +10,11 @@
 #if USE_EDITOR
 #include "Engine/Renderer/Lightmaps.h"
 #endif
+#include "Engine/Content/Content.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Level/Scene/Lightmap.h"
 #include "Engine/Level/Actors/EnvironmentProbe.h"
+#include "Engine/Renderer/ReflectionsPass.h"
 
 void ForwardShadingFeature::Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv)
 {
@@ -26,29 +28,13 @@ void ForwardShadingFeature::Bind(MaterialShader::BindParameters& params, Span<by
     const int32 shadowsBufferRegisterIndex = srv + 2;
     const int32 shadowMapShaderRegisterIndex = srv + 3;
     const int32 volumetricFogTextureRegisterIndex = srv + 4;
+    const int32 preIntegratedGFRegisterIndex = srv + 5;
     const bool canUseShadow = view.Pass != DrawPass::Depth;
 
     // Set fog input
-    GPUTextureView* volumetricFogTexture = nullptr;
-    if (cache->Fog)
-    {
-        cache->Fog->GetExponentialHeightFogData(view, data.ExponentialHeightFog);
-        VolumetricFogOptions volumetricFog;
-        cache->Fog->GetVolumetricFogOptions(volumetricFog);
-        if (volumetricFog.UseVolumetricFog() && params.RenderContext.Buffers->VolumetricFog)
-            volumetricFogTexture = params.RenderContext.Buffers->VolumetricFog->ViewVolume();
-        else
-            data.ExponentialHeightFog.VolumetricFogMaxDistance = -1.0f;
-    }
-    else
-    {
-        data.ExponentialHeightFog.FogMinOpacity = 1.0f;
-        data.ExponentialHeightFog.FogDensity = 0.0f;
-        data.ExponentialHeightFog.FogCutoffDistance = 0.1f;
-        data.ExponentialHeightFog.StartDistance = 0.0f;
-        data.ExponentialHeightFog.ApplyDirectionalInscattering = 0.0f;
-    }
-    params.GPUContext->BindSR(volumetricFogTextureRegisterIndex, volumetricFogTexture);
+    data.ExponentialHeightFog = cache->Fog.ExponentialHeightFogData;
+    data.VolumetricFogData = cache->Fog.VolumetricFogData;
+    params.GPUContext->BindSR(volumetricFogTextureRegisterIndex, cache->Fog.VolumetricFogTexture);
 
     // Set directional light input
     if (cache->DirectionalLights.HasItems())
@@ -87,22 +73,27 @@ void ForwardShadingFeature::Bind(MaterialShader::BindParameters& params, Span<by
     bool noEnvProbe = true;
     // TODO: optimize env probe searching for a transparent material - use spatial cache for renderer to find it
     const BoundingSphere objectBounds(drawCall.ObjectPosition, drawCall.ObjectRadius);
+    float minDistanceSq = MAX_float;
+    GPUTexture* envProbeTexture = nullptr;
     for (int32 i = 0; i < cache->EnvironmentProbes.Count(); i++)
     {
         const RenderEnvironmentProbeData& probe = cache->EnvironmentProbes.Get()[i];
-        if (objectBounds.Intersects(BoundingSphere(probe.Position, probe.Radius)))
+        const float sphereCullDistance = objectBounds.Radius + probe.Radius;
+        const float distanceSq = Float3::DistanceSquared(probe.Position, objectBounds.Center);
+        if (distanceSq <= sphereCullDistance * sphereCullDistance && distanceSq < minDistanceSq)
         {
             noEnvProbe = false;
+            minDistanceSq = distanceSq;
+            envProbeTexture = probe.Texture;
             probe.SetShaderData(data.EnvironmentProbe);
-            params.GPUContext->BindSR(envProbeShaderRegisterIndex, probe.Texture);
-            break;
         }
     }
     if (noEnvProbe)
-    {
-        data.EnvironmentProbe.Data1 = Float4::Zero;
-        params.GPUContext->UnBindSR(envProbeShaderRegisterIndex);
-    }
+        Platform::MemoryClear(&data.EnvironmentProbe, sizeof(data.EnvironmentProbe));
+    params.GPUContext->BindSR(envProbeShaderRegisterIndex, envProbeTexture);
+    // TODO: find a better way to find this texture (eg. cache GPUTextureView* handle within ForwardShading cache for a whole frame)
+    static AssetReference<Texture> PreIntegratedGF = Content::LoadAsyncInternal<Texture>(PRE_INTEGRATED_GF_ASSET_NAME);
+    params.GPUContext->BindSR(preIntegratedGFRegisterIndex, PreIntegratedGF->GetTexture());
 
     // Set local lights
     data.LocalLightsCount = 0;
@@ -191,7 +182,7 @@ bool GlobalIlluminationFeature::Bind(MaterialShader::BindParameters& params, Spa
     {
         // Unbind SRVs to prevent issues
         data.DDGI.CascadesCount = 0;
-        data.DDGI.FallbackIrradiance = Float3::Zero;
+        data.DDGI.FallbackIrradiance = Float4::Zero;
         params.GPUContext->UnBindSR(srv + 0);
         params.GPUContext->UnBindSR(srv + 1);
         params.GPUContext->UnBindSR(srv + 2);

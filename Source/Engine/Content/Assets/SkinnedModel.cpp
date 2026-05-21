@@ -12,6 +12,7 @@
 #include "Engine/Graphics/Models/Config.h"
 #include "Engine/Graphics/Models/MeshDeformation.h"
 #include "Engine/Graphics/Models/ModelInstanceEntry.h"
+#include "Engine/Graphics/Models/ModelDraw.h"
 #include "Engine/Graphics/Shaders/GPUVertexLayout.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
@@ -61,16 +62,24 @@ Array<String> SkinnedModel::GetBlendShapes()
 
 SkinnedModel::SkeletonMapping SkinnedModel::GetSkeletonMapping(Asset* source, bool autoRetarget)
 {
+    // Fast-path to use cached mapping
     SkeletonMapping mapping;
     mapping.TargetSkeleton = this;
+    SkeletonMappingData mappingData;
+    if (_skeletonMappingCache.TryGet(source, mappingData))
+    {
+        mapping.SourceSkeleton = mappingData.SourceSkeleton;
+        mapping.NodesMapping = mappingData.NodesMapping;
+        return mapping;
+    }
+    mapping.SourceSkeleton = nullptr;
+
     if (WaitForLoaded() || !source || source->WaitForLoaded())
         return mapping;
+    PROFILE_CPU();
     ScopeLock lock(Locker);
-    SkeletonMappingData mappingData;
     if (!_skeletonMappingCache.TryGet(source, mappingData))
     {
-        PROFILE_CPU();
-
         // Initialize the mapping
         SkeletonRetarget* retarget = nullptr;
         const Guid sourceId = source->GetID();
@@ -226,113 +235,14 @@ BoundingBox SkinnedModel::GetBox(int32 lodIndex) const
     return LODs[lodIndex].GetBox();
 }
 
-template<typename ContextType>
-FORCE_INLINE void SkinnedModelDraw(SkinnedModel* model, const RenderContext& renderContext, const ContextType& context, const SkinnedMesh::DrawInfo& info)
-{
-    ASSERT(info.Buffer);
-    if (!model->CanBeRendered())
-        return;
-    if (!info.Buffer->IsValidFor(model))
-        info.Buffer->Setup(model);
-    const auto frame = Engine::FrameCount;
-    const auto modelFrame = info.DrawState->PrevFrame + 1;
-
-    // Select a proper LOD index (model may be culled)
-    int32 lodIndex;
-    if (info.ForcedLOD != -1)
-    {
-        lodIndex = info.ForcedLOD;
-    }
-    else
-    {
-        lodIndex = RenderTools::ComputeSkinnedModelLOD(model, info.Bounds.Center, (float)info.Bounds.Radius, renderContext);
-        if (lodIndex == -1)
-        {
-            // Handling model fade-out transition
-            if (modelFrame == frame && info.DrawState->PrevLOD != -1 && !renderContext.View.IsSingleFrame)
-            {
-                // Check if start transition
-                if (info.DrawState->LODTransition == 255)
-                {
-                    info.DrawState->LODTransition = 0;
-                }
-
-                RenderTools::UpdateModelLODTransition(info.DrawState->LODTransition);
-
-                // Check if end transition
-                if (info.DrawState->LODTransition == 255)
-                {
-                    info.DrawState->PrevLOD = lodIndex;
-                }
-                else
-                {
-                    const auto prevLOD = model->ClampLODIndex(info.DrawState->PrevLOD);
-                    const float normalizedProgress = static_cast<float>(info.DrawState->LODTransition) * (1.0f / 255.0f);
-                    model->LODs.Get()[prevLOD].Draw(renderContext, info, normalizedProgress);
-                }
-            }
-
-            return;
-        }
-    }
-    lodIndex += info.LODBias + renderContext.View.ModelLODBias;
-    lodIndex = model->ClampLODIndex(lodIndex);
-
-    if (renderContext.View.IsSingleFrame)
-    {
-    }
-    // Check if it's the new frame and could update the drawing state (note: model instance could be rendered many times per frame to different viewports)
-    else if (modelFrame == frame)
-    {
-        // Check if start transition
-        if (info.DrawState->PrevLOD != lodIndex && info.DrawState->LODTransition == 255)
-        {
-            info.DrawState->LODTransition = 0;
-        }
-
-        RenderTools::UpdateModelLODTransition(info.DrawState->LODTransition);
-
-        // Check if end transition
-        if (info.DrawState->LODTransition == 255)
-        {
-            info.DrawState->PrevLOD = lodIndex;
-        }
-    }
-    // Check if there was a gap between frames in drawing this model instance
-    else if (modelFrame < frame || info.DrawState->PrevLOD == -1)
-    {
-        // Reset state
-        info.DrawState->PrevLOD = lodIndex;
-        info.DrawState->LODTransition = 255;
-    }
-
-    // Draw
-    if (info.DrawState->PrevLOD == lodIndex || renderContext.View.IsSingleFrame)
-    {
-        model->LODs.Get()[lodIndex].Draw(context, info, 0.0f);
-    }
-    else if (info.DrawState->PrevLOD == -1)
-    {
-        const float normalizedProgress = static_cast<float>(info.DrawState->LODTransition) * (1.0f / 255.0f);
-        model->LODs.Get()[lodIndex].Draw(context, info, 1.0f - normalizedProgress);
-    }
-    else
-    {
-        const auto prevLOD = model->ClampLODIndex(info.DrawState->PrevLOD);
-        const float normalizedProgress = static_cast<float>(info.DrawState->LODTransition) * (1.0f / 255.0f);
-        model->LODs.Get()[prevLOD].Draw(context, info, normalizedProgress);
-        model->LODs.Get()[lodIndex].Draw(context, info, normalizedProgress - 1.0f);
-    }
-}
-
 void SkinnedModel::Draw(const RenderContext& renderContext, const SkinnedMesh::DrawInfo& info)
 {
-    SkinnedModelDraw(this, renderContext, renderContext, info);
+    ModelDraw(this, renderContext, renderContext, info);
 }
 
 void SkinnedModel::Draw(const RenderContextBatch& renderContextBatch, const SkinnedMesh::DrawInfo& info)
 {
-    SkinnedModelDraw(this, renderContextBatch.GetMainContext(), renderContextBatch, info);
+    ModelDraw(this, renderContextBatch.GetMainContext(), renderContextBatch, info);
 }
 
 bool SkinnedModel::SetupLODs(const Span<int32>& meshesCountPerLod)
@@ -370,6 +280,7 @@ bool SkinnedModel::SetupSkeleton(const Array<SkeletonNode>& nodes)
         model->Skeleton.Bones[i].LocalTransform = node.LocalTransform;
         model->Skeleton.Bones[i].NodeIndex = i;
     }
+    model->Skeleton.Dirty();
     ClearSkeletonMapping();
 
     // Calculate offset matrix (inverse bind pose transform) for every bone manually
@@ -427,6 +338,7 @@ bool SkinnedModel::SetupSkeleton(const Array<SkeletonNode>& nodes, const Array<S
     // Setup
     model->Skeleton.Nodes = nodes;
     model->Skeleton.Bones = bones;
+    model->Skeleton.Dirty();
     ClearSkeletonMapping();
 
     // Calculate offset matrix (inverse bind pose transform) for every bone manually
@@ -823,13 +735,13 @@ bool SkinnedModel::SaveMesh(WriteStream& stream, const ModelData& modelData, int
 
 void SkinnedModel::ClearSkeletonMapping()
 {
-    for (auto& e : _skeletonMappingCache)
+    for (const auto& e : _skeletonMappingCache)
     {
         e.Key->OnUnloaded.Unbind<SkinnedModel, &SkinnedModel::OnSkeletonMappingSourceAssetUnloaded>(this);
 #if USE_EDITOR
         e.Key->OnReloading.Unbind<SkinnedModel, &SkinnedModel::OnSkeletonMappingSourceAssetUnloaded>(this);
 #endif
-        Allocator::Free(e.Value.NodesMapping.Get());
+        Allocator::Free((void*)e.Value.NodesMapping.Get());
     }
     _skeletonMappingCache.Clear();
 }
@@ -837,8 +749,9 @@ void SkinnedModel::ClearSkeletonMapping()
 void SkinnedModel::OnSkeletonMappingSourceAssetUnloaded(Asset* obj)
 {
     ScopeLock lock(Locker);
-    auto i = _skeletonMappingCache.Find(obj);
-    ASSERT(i != _skeletonMappingCache.End());
+    SkeletonMappingData mappingData;
+    bool found = _skeletonMappingCache.TryGet(obj, mappingData);
+    ASSERT(found);
 
     // Unlink event
     obj->OnUnloaded.Unbind<SkinnedModel, &SkinnedModel::OnSkeletonMappingSourceAssetUnloaded>(this);
@@ -847,8 +760,8 @@ void SkinnedModel::OnSkeletonMappingSourceAssetUnloaded(Asset* obj)
 #endif
 
     // Clear cache
-    Allocator::Free(i->Value.NodesMapping.Get());
-    _skeletonMappingCache.Remove(i);
+    Allocator::Free(mappingData.NodesMapping.Get());
+    _skeletonMappingCache.Remove(obj);
 }
 
 uint64 SkinnedModel::GetMemoryUsage() const

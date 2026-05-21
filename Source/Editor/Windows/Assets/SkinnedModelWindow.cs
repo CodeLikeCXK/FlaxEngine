@@ -70,6 +70,13 @@ namespace FlaxEditor.Windows.Assets
                         return;
                     var nodes = proxy.Asset.Nodes;
                     var bones = proxy.Asset.Bones;
+                    var blendShapes = proxy.Asset.BlendShapes;
+
+                    // Info
+                    {
+                        var group = layout.Group("Info");
+                        group.Label($"Nodes: {nodes.Length}\nBones: {bones.Length}\nBlend Shapes: {blendShapes.Length}").AddCopyContextMenu().Label.Height *= 2.5f;
+                    }
 
                     // Skeleton Bones
                     {
@@ -109,7 +116,6 @@ namespace FlaxEditor.Windows.Assets
                     }
 
                     // Blend Shapes
-                    var blendShapes = proxy.Asset.BlendShapes;
                     if (blendShapes.Length != 0)
                     {
                         var group = layout.Group("Blend Shapes");
@@ -266,7 +272,7 @@ namespace FlaxEditor.Windows.Assets
                         infoLabel.AutoHeight = true;
                         var sourceAssetPicker = setupGroup.AddPropertyItem("Source Asset").Custom<AssetPicker>().CustomControl;
                         sourceAssetPicker.Height = 48;
-                        sourceAssetPicker.CheckValid = CheckSourceAssetValid;
+                        sourceAssetPicker.Validator.CheckValid = CheckSourceAssetValid;
                         sourceAssetPicker.SelectedItemChanged += () =>
                         {
                             proxy.Setups.Add(sourceAssetPicker.Validator.SelectedAsset, new SetupProxy());

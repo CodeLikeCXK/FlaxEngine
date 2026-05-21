@@ -15,6 +15,7 @@
 #include "Engine/Profiler/Profiler.h"
 #include "Engine/Content/Assets/CubeTexture.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Core/Math/Half.h"
 #include "Engine/Graphics/Shaders/GPUVertexLayout.h"
 #include "Engine/Level/Scene/Lightmap.h"
 #include "Engine/Level/Actors/PostFxVolume.h"
@@ -30,6 +31,20 @@ namespace
     Array<RenderList*> FreeRenderList;
     Array<Pair<void*, uintptr>> MemPool;
     CriticalSection MemPoolLocker;
+
+    typedef Array<RenderList::IExtension*, FixedAllocation<8>> ExtensionsList;
+    ExtensionsList& GetExtensions()
+    {
+        static ExtensionsList list;
+        return list;
+    }
+
+    FORCE_INLINE bool IsSimpleMaterial(const MaterialInfo& info)
+    {
+        return EnumHasNoneFlags(info.UsageFlags, MaterialUsageFlags::UseMask | MaterialUsageFlags::UsePositionOffset | MaterialUsageFlags::UseDisplacement) &&
+            EnumHasNoneFlags(info.FeaturesFlags, MaterialFeaturesFlags::Wireframe) &&
+            info.BlendMode == MaterialBlendMode::Opaque;
+    }
 }
 
 void ShaderObjectData::Store(const Matrix& worldMatrix, const Matrix& prevWorldMatrix, const Rectangle& lightmapUVsArea, const Float3& geometrySize, float perInstanceRandom, float worldDeterminantSign, float lodDitherFactor)
@@ -163,13 +178,49 @@ void RenderSkyLightData::SetShaderData(ShaderLightData& data, bool useShadow) co
 
 void RenderEnvironmentProbeData::SetShaderData(ShaderEnvProbeData& data) const
 {
-    data.Data0 = Float4(Position, 0);
-    data.Data1 = Float4(Radius, 1.0f / Radius, Brightness, 0);
+    data.Data0 = Float4(Position, Brightness);
+    if (BoxProjection)
+    {
+        data.Data0.W *= -1;
+        data.Data1 = Float4(Scale * Radius, BlendDistance);
+        Quaternion invQuat;
+        Quaternion::Invert(Orientation, invQuat);
+        data.Data2 = *(Float4*)&invQuat;
+    }
+    else
+    {
+        data.Data1 = Float4(Radius, 0, 0, 0);
+        data.Data2 = Float4::Zero;
+    }
+}
+
+RenderFogData::RenderFogData()
+{
+    Renderer = nullptr;
+    VolumetricFogTexture = nullptr;
+    Platform::MemoryClear(&ExponentialHeightFogData, sizeof(ExponentialHeightFogData));
+    ExponentialHeightFogData.FogMinOpacity = 1.0f;
+    ExponentialHeightFogData.FogCutoffDistance = 0.1f;
+    ExponentialHeightFogData.VolumetricFogMaxDistance = -1.0f;
+    VolumetricFogData.GridSliceParameters = Float4::One;
+    VolumetricFogData.ScreenSize = VolumetricFogData.VolumeTexelSize = Float2::Zero;
+}
+
+void RenderFogData::Init(const RenderView& view, IFogRenderer* renderer)
+{
+    Renderer = renderer;
+    renderer->GetExponentialHeightFogData(view, ExponentialHeightFogData);
+    renderer->GetVolumetricFogOptions(VolumetricFog);
+    if (!VolumetricFog.UseVolumetricFog())
+    {
+        ExponentialHeightFogData.VolumetricFogMaxDistance = -1;
+    }
 }
 
 void* RendererAllocation::Allocate(uintptr size)
 {
     PROFILE_CPU();
+    size = AllocationUtils::AlignToPowerOf2((int32)size); // Reduce fragmentation by operating on power-of-2 blocks
     void* result = nullptr;
     MemPoolLocker.Lock();
     for (int32 i = 0; i < MemPool.Count(); i++)
@@ -190,6 +241,7 @@ void* RendererAllocation::Allocate(uintptr size)
 void RendererAllocation::Free(void* ptr, uintptr size)
 {
     PROFILE_CPU();
+    size = AllocationUtils::AlignToPowerOf2((int32)size); // Reduce fragmentation by operating on power-of-2 blocks
     MemPoolLocker.Lock();
     MemPool.Add({ ptr, size });
     MemPoolLocker.Unlock();
@@ -235,6 +287,16 @@ void RenderList::CleanupCache()
     MemPoolLocker.Unlock();
 }
 
+RenderList::IExtension::IExtension()
+{
+    GetExtensions().Add(this);
+}
+
+RenderList::IExtension::~IExtension()
+{
+    GetExtensions().Remove(this);
+}
+
 bool RenderList::BlendableSettings::operator<(const BlendableSettings& other) const
 {
     // Sort by higher priority
@@ -257,18 +319,31 @@ void RenderList::AddSettingsBlend(IPostFxSettingsProvider* provider, float weigh
 
 void RenderList::AddDelayedDraw(DelayedDraw&& func)
 {
-    MemPoolLocker.Lock(); // TODO: convert _delayedDraws into RenderListBuffer with usage of arena Memory for fast alloc
     _delayedDraws.Add(MoveTemp(func));
-    MemPoolLocker.Unlock();
 }
 
-void RenderList::DrainDelayedDraws(RenderContextBatch& renderContextBatch, int32 contextIndex)
+void RenderList::DrainDelayedDraws(GPUContext* context, RenderContextBatch& renderContextBatch, int32 renderContextIndex)
 {
-    if (_delayedDraws.IsEmpty())
+    if (_delayedDraws.Count() == 0)
         return;
+    PROFILE_CPU();
     for (DelayedDraw& e : _delayedDraws)
-        e(renderContextBatch, contextIndex);
-    _delayedDraws.SetCapacity(0);
+        e(context, renderContextBatch, renderContextIndex);
+    _delayedDraws.Clear();
+}
+
+#define LOOP_EXTENSIONS() const auto& extensions = GetExtensions(); for (auto* e : extensions)
+
+void RenderList::PreDraw(GPUContext* context, RenderContextBatch& renderContextBatch)
+{
+    LOOP_EXTENSIONS()
+        e->PreDraw(context, renderContextBatch);
+}
+
+void RenderList::PostDraw(GPUContext* context, RenderContextBatch& renderContextBatch)
+{
+    LOOP_EXTENSIONS()
+        e->PostDraw(context, renderContextBatch);
 }
 
 void RenderList::BlendSettings()
@@ -331,6 +406,7 @@ void RenderList::RunPostFxPass(GPUContext* context, RenderContext& renderContext
         auto material = Settings.PostFxMaterials.Materials[i].Get();
         if (material && material->IsReady() && material->IsPostFx() && material->GetInfo().PostFxLocation == locationA)
         {
+            context->ResetSR();
             ASSERT(needTempTarget);
             context->SetRenderTarget(*output);
             bindParams.Input = *input;
@@ -367,6 +443,7 @@ void RenderList::RunPostFxPass(GPUContext* context, RenderContext& renderContext
 
     if (needTempTarget)
         RenderTargetPool::Release(output);
+    context->ResetSR();
 }
 
 void RenderList::RunMaterialPostFxPass(GPUContext* context, RenderContext& renderContext, MaterialPostFxLocation location, GPUTexture*& input, GPUTexture*& output)
@@ -377,6 +454,7 @@ void RenderList::RunMaterialPostFxPass(GPUContext* context, RenderContext& rende
         auto material = Settings.PostFxMaterials.Materials[i].Get();
         if (material && material->IsReady() && material->IsPostFx() && material->GetInfo().PostFxLocation == location)
         {
+            context->ResetSR();
             context->SetRenderTarget(*output);
             bindParams.Input = *input;
             material->Bind(bindParams);
@@ -395,6 +473,7 @@ void RenderList::RunCustomPostFxPass(GPUContext* context, RenderContext& renderC
     {
         if (fx->Location == location)
         {
+            context->ResetSR();
             if (fx->UseSingleTarget || output == nullptr)
             {
                 fx->Render(context, renderContext, input, nullptr);
@@ -489,12 +568,10 @@ RenderList::RenderList(const SpawnParams& params)
     , Decals(64)
     , Sky(nullptr)
     , AtmosphericFog(nullptr)
-    , Fog(nullptr)
     , Blendable(32)
     , ObjectBuffer(0, PixelFormat::R32G32B32A32_Float, false, TEXT("Object Buffer"))
     , TempObjectBuffer(0, PixelFormat::R32G32B32A32_Float, false, TEXT("Object Buffer"))
     , _instanceBuffer(0, sizeof(ShaderObjectDrawInstanceData), TEXT("Instance Buffer"), GPUVertexLayout::Get({ { VertexElement::Types::Attribute0, 3, 0, 1, PixelFormat::R32_UInt } }))
-    , _delayedDraws(&Memory)
 {
 }
 
@@ -522,7 +599,7 @@ void RenderList::Clear()
     VolumetricFogParticles.Clear();
     Sky = nullptr;
     AtmosphericFog = nullptr;
-    Fog = nullptr;
+    Fog = RenderFogData();
     PostFx.Clear();
     Settings = PostProcessSettings();
     Blendable.Clear();
@@ -665,6 +742,7 @@ void RenderList::AddDrawCall(const RenderContextBatch& renderContextBatch, DrawP
             DrawCallsLists[(int32)DrawCallsListType::MotionVectors].Indices.Add(index);
         }
     }
+    float minObjectPixelSizeSq = Math::Square(Graphics::Shadows::MinObjectPixelSize);
     for (int32 i = 1; i < renderContextBatch.Contexts.Count(); i++)
     {
         const RenderContext& renderContext = renderContextBatch.Contexts.Get()[i];
@@ -672,7 +750,8 @@ void RenderList::AddDrawCall(const RenderContextBatch& renderContextBatch, DrawP
         drawModes = modes & renderContext.View.Pass;
         if (drawModes != DrawPass::None &&
             (staticFlags & renderContext.View.StaticFlagsMask) == renderContext.View.StaticFlagsCompare &&
-            renderContext.View.CullingFrustum.Intersects(bounds))
+            renderContext.View.CullingFrustum.Intersects(bounds) &&
+            RenderTools::ComputeBoundsScreenRadiusSquared(bounds.Center, (float)bounds.Radius, renderContext.View) * (renderContext.View.ScreenSize.X * renderContext.View.ScreenSize.Y) >= minObjectPixelSizeSq)
         {
             renderContext.List->ShadowDepthDrawCallsList.Indices.Add(index);
         }
@@ -826,6 +905,13 @@ FORCE_INLINE bool DrawsEqual(const DrawCall* a, const DrawCall* b)
             Platform::MemoryCompare(a->Geometry.VertexBuffers, b->Geometry.VertexBuffers, sizeof(a->Geometry.VertexBuffers) + sizeof(a->Geometry.VertexBuffersOffsets)) == 0;
 }
 
+FORCE_INLINE Span<GPUBuffer*> GetVB(GPUBuffer* const* ptr, int32 maxSize)
+{
+    while (ptr[maxSize - 1] == nullptr && maxSize > 1)
+        maxSize--;
+    return ToSpan<GPUBuffer*>(ptr, maxSize);
+}
+
 void RenderList::ExecuteDrawCalls(const RenderContext& renderContext, DrawCallsList& list, RenderList* drawCallsList, GPUTextureView* input)
 {
     if (list.IsEmpty())
@@ -954,7 +1040,7 @@ void RenderList::ExecuteDrawCalls(const RenderContext& renderContext, DrawCallsL
                     Platform::MemoryCopy(vb, activeDraw->Geometry.VertexBuffers, sizeof(DrawCall::Geometry.VertexBuffers));
                     Platform::MemoryCopy(vbOffsets, activeDraw->Geometry.VertexBuffersOffsets, sizeof(DrawCall::Geometry.VertexBuffersOffsets));
                     context->BindIB(activeDraw->Geometry.IndexBuffer);
-                    context->BindVB(ToSpan(vb, ARRAY_COUNT(vb)), vbOffsets);
+                    context->BindVB(GetVB(vb, ARRAY_COUNT(vb)), vbOffsets);
                     context->DrawIndexedInstanced(activeDraw->Draw.IndicesCount, activeCount, instanceBufferOffset, 0, activeDraw->Draw.StartIndex);
                     instanceBufferOffset += activeCount;
 
@@ -971,7 +1057,7 @@ void RenderList::ExecuteDrawCalls(const RenderContext& renderContext, DrawCallsL
 
                 // Single-draw call batch
                 context->BindIB(drawCall.Geometry.IndexBuffer);
-                context->BindVB(ToSpan(drawCall.Geometry.VertexBuffers, vbMax), drawCall.Geometry.VertexBuffersOffsets);
+                context->BindVB(GetVB(drawCall.Geometry.VertexBuffers, vbMax), drawCall.Geometry.VertexBuffersOffsets);
                 if (drawCall.InstanceCount == 0)
                 {
                     context->DrawIndexedInstancedIndirect(drawCall.Draw.IndirectArgsBuffer, drawCall.Draw.IndirectArgsOffset);
@@ -994,7 +1080,7 @@ void RenderList::ExecuteDrawCalls(const RenderContext& renderContext, DrawCallsL
             Platform::MemoryCopy(vb, drawCall.Geometry.VertexBuffers, sizeof(DrawCall::Geometry.VertexBuffers));
             Platform::MemoryCopy(vbOffsets, drawCall.Geometry.VertexBuffersOffsets, sizeof(DrawCall::Geometry.VertexBuffersOffsets));
             context->BindIB(drawCall.Geometry.IndexBuffer);
-            context->BindVB(ToSpan(vb, vbMax + 1), vbOffsets);
+            context->BindVB(GetVB(vb, vbMax + 1), vbOffsets);
 
             if (drawCall.InstanceCount == 0)
             {
@@ -1024,7 +1110,7 @@ void RenderList::ExecuteDrawCalls(const RenderContext& renderContext, DrawCallsL
 
                 const DrawCall& drawCall = drawCallsData[perDraw.DrawObjectIndex];
                 context->BindIB(drawCall.Geometry.IndexBuffer);
-                context->BindVB(ToSpan(drawCall.Geometry.VertexBuffers, vbMax), drawCall.Geometry.VertexBuffersOffsets);
+                context->BindVB(GetVB(drawCall.Geometry.VertexBuffers, vbMax), drawCall.Geometry.VertexBuffersOffsets);
 
                 if (drawCall.InstanceCount == 0)
                 {
@@ -1045,7 +1131,7 @@ void RenderList::ExecuteDrawCalls(const RenderContext& renderContext, DrawCallsL
             bindParams.DrawCall->Material->Bind(bindParams);
 
             context->BindIB(drawCall.Geometry.IndexBuffer);
-            context->BindVB(ToSpan(drawCall.Geometry.VertexBuffers, vbMax), drawCall.Geometry.VertexBuffersOffsets);
+            context->BindVB(GetVB(drawCall.Geometry.VertexBuffers, vbMax), drawCall.Geometry.VertexBuffersOffsets);
 
             for (int32 j = 0; j < batch.Instances.Count(); j++)
             {
@@ -1069,7 +1155,7 @@ void RenderList::ExecuteDrawCalls(const RenderContext& renderContext, DrawCallsL
                 drawCall.Material->Bind(bindParams);
 
                 context->BindIB(drawCall.Geometry.IndexBuffer);
-                context->BindVB(ToSpan(drawCall.Geometry.VertexBuffers, vbMax), drawCall.Geometry.VertexBuffersOffsets);
+                context->BindVB(GetVB(drawCall.Geometry.VertexBuffers, vbMax), drawCall.Geometry.VertexBuffersOffsets);
 
                 if (drawCall.InstanceCount == 0)
                 {
@@ -1102,12 +1188,7 @@ bool SurfaceDrawCallHandler::CanBatch(const DrawCall& a, const DrawCall& b, Draw
             // Batch simple materials during depth-only drawing (when using default vertex shader and no pixel shader)
             if (pass == DrawPass::Depth)
             {
-                const MaterialInfo& aInfo = a.Material->GetInfo();
-                const MaterialInfo& bInfo = b.Material->GetInfo();
-                constexpr MaterialUsageFlags complexUsageFlags = MaterialUsageFlags::UseMask | MaterialUsageFlags::UsePositionOffset | MaterialUsageFlags::UseDisplacement;
-                const bool aIsSimple = EnumHasNoneFlags(aInfo.UsageFlags, complexUsageFlags) && aInfo.BlendMode == MaterialBlendMode::Opaque;
-                const bool bIsSimple = EnumHasNoneFlags(bInfo.UsageFlags, complexUsageFlags) && bInfo.BlendMode == MaterialBlendMode::Opaque;
-                return aIsSimple && bIsSimple;
+                return IsSimpleMaterial(a.Material->GetInfo()) && IsSimpleMaterial(b.Material->GetInfo());
             }
             return false;
         }

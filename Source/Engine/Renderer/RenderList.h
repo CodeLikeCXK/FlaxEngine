@@ -4,7 +4,7 @@
 
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Core/Memory/ArenaAllocation.h"
-#include "Engine/Core/Math/Half.h"
+#include "Engine/Core/Math/Quaternion.h"
 #include "Engine/Graphics/PostProcessSettings.h"
 #include "Engine/Graphics/DynamicBuffer.h"
 #include "Engine/Scripting/ScriptingObject.h"
@@ -154,10 +154,14 @@ struct RenderEnvironmentProbeData
 {
     GPUTexture* Texture;
     Float3 Position;
-    float Radius;
+    float Radius; // unscaled for box
     float Brightness;
     int32 SortOrder;
     uint32 HashID;
+    bool BoxProjection;
+    Float3 Scale; // box-only
+    float BlendDistance;
+    Quaternion Orientation; // box-only
 
     void SetShaderData(ShaderEnvProbeData& data) const;
 };
@@ -168,6 +172,18 @@ struct RenderDecalData
     MaterialBase* Material;
     int32 SortOrder;
     uint32 RenderLayersMask;
+};
+
+struct RenderFogData
+{
+    IFogRenderer* Renderer;
+    GPUTextureView* VolumetricFogTexture;
+    ShaderExponentialHeightFogData ExponentialHeightFogData;
+    ShaderVolumetricFogData VolumetricFogData;
+    VolumetricFogOptions VolumetricFog;
+
+    RenderFogData();
+    void Init(const RenderView& view, IFogRenderer* renderer);
 };
 
 /// <summary>
@@ -327,6 +343,21 @@ API_CLASS(Sealed) class FLAXENGINE_API RenderList : public ScriptingObject
     /// </summary>
     static void CleanupCache();
 
+    /// <summary>
+    /// The rendering extension interface for custom drawing/effects linked to RenderList. Can be used during async scene drawing and further drawing/processing for more optimized rendering.
+    /// </summary>
+    class FLAXENGINE_API IExtension
+    {
+    public:
+        IExtension();
+        virtual ~IExtension();
+
+        // Event called before collecting draw calls. Can be used for initialization.
+        virtual void PreDraw(GPUContext* context, RenderContextBatch& renderContextBatch) {}
+        // Event called after collecting draw calls. Can be used for cleanup or to perform additional drawing using collected draw calls data such as batched data processing.
+        virtual void PostDraw(GPUContext* context, RenderContextBatch& renderContextBatch) {}
+    };
+
 public:
     /// <summary>
     /// Memory storage with all draw-related data that lives during a single frame rendering time. Thread-safe to allocate memory during rendering jobs.
@@ -404,9 +435,9 @@ public:
     IAtmosphericFogRenderer* AtmosphericFog;
 
     /// <summary>
-    /// Fog renderer proxy to use (only one per frame)
+    /// Fog rendering data.
     /// </summary>
-    IFogRenderer* Fog;
+    RenderFogData Fog;
 
     /// <summary>
     /// Post effects to render.
@@ -460,13 +491,14 @@ public:
     /// </summary>
     DynamicTypedBuffer TempObjectBuffer;
 
-    typedef Function<void(RenderContextBatch& renderContextBatch, int32 contextIndex)> DelayedDraw;
+    typedef Function<void(GPUContext* context, RenderContextBatch& renderContextBatch, int32 renderContextIndex)> DelayedDraw;
     void AddDelayedDraw(DelayedDraw&& func);
-    void DrainDelayedDraws(RenderContextBatch& renderContextBatch, int32 contextIndex);
+    void DrainDelayedDraws(GPUContext* context, RenderContextBatch& renderContextBatch, int32 renderContextIndex);
 
     /// <summary>
     /// Adds custom callback (eg. lambda) to invoke after scene draw calls are collected on a main thread (some async draw tasks might be active). Allows for safe usage of GPUContext for draw preparations or to perform GPU-driven drawing.
     /// </summary>
+    /// <remarks>Can be called in async during scene rendering (thread-safe internally). Lambda is allocated by concurrent arena allocator owned by the RenderList.</remarks>
     template<typename T>
     FORCE_INLINE void AddDelayedDraw(const T& lambda)
     {
@@ -475,9 +507,13 @@ public:
         AddDelayedDraw(MoveTemp(func));
     }
 
+    // IExtension implementation
+    void PreDraw(GPUContext* context, RenderContextBatch& renderContextBatch);
+    void PostDraw(GPUContext* context, RenderContextBatch& renderContextBatch);
+
 private:
     DynamicVertexBuffer _instanceBuffer;
-    Array<DelayedDraw, ConcurrentArenaAllocation> _delayedDraws;
+    RenderListBuffer<DelayedDraw> _delayedDraws;
 
 public:
     /// <summary>

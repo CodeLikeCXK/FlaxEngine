@@ -14,17 +14,10 @@ namespace FlaxEditor.Surface
     /// </summary>
     /// <seealso cref="SurfaceNode" />
     [HideInEditor]
-    public class SurfaceComment : SurfaceNode
+    public class SurfaceComment : ResizableSurfaceNode
     {
         private Rectangle _colorButtonRect;
-        private Rectangle _resizeButtonRect;
-        private Float2 _startResizingSize;
         private readonly TextBox _renameTextBox;
-
-        /// <summary>
-        /// True if sizing tool is in use.
-        /// </summary>
-        protected bool _isResizing;
 
         /// <summary>
         /// True if rename textbox is active in order to rename comment
@@ -52,12 +45,6 @@ namespace FlaxEditor.Surface
             set => SetValue(1, value, false);
         }
 
-        private Float2 SizeValue
-        {
-            get => (Float2)Values[2];
-            set => SetValue(2, value, false);
-        }
-
         private int OrderValue
         {
             get => (int)Values[3];
@@ -68,9 +55,11 @@ namespace FlaxEditor.Surface
         public SurfaceComment(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
         : base(id, context, nodeArch, groupArch)
         {
+            _sizeValueIndex = 2; // Index of the Size stored in Values array
+            _sizeMin = new Float2(140.0f, Constants.NodeHeaderHeight);
             _renameTextBox = new TextBox(false, 0, 0, Width)
             {
-                Height = Constants.NodeHeaderSize,
+                Height = Constants.NodeHeaderHeight,
                 Visible = false,
                 Parent = this,
                 EndEditOnClick = false, // We have to handle this ourselves, otherwise the textbox instantly loses focus when double-clicking the header
@@ -86,10 +75,6 @@ namespace FlaxEditor.Surface
             // Read node data
             Title = TitleValue;
             Color = ColorValue;
-            var size = SizeValue;
-            if (Surface != null && Surface.GridSnappingEnabled)
-                size = Surface.SnapToGrid(size, true);
-            Size = size;
 
             // Order
             // Backwards compatibility - When opening with an older version send the old comments to the back
@@ -126,27 +111,6 @@ namespace FlaxEditor.Surface
             // Read node data
             Title = TitleValue;
             Color = ColorValue;
-            Size = SizeValue;
-        }
-
-        private void EndResizing()
-        {
-            // Clear state
-            _isResizing = false;
-
-            if (_startResizingSize != Size)
-            {
-                SizeValue = Size;
-                Surface.MarkAsEdited(false);
-            }
-
-            EndMouseCapture();
-        }
-
-        /// <inheritdoc />
-        public override bool CanSelect(ref Float2 location)
-        {
-            return _headerRect.MakeOffsetted(Location).Contains(ref location) && !_resizeButtonRect.MakeOffsetted(Location).Contains(ref location);
         }
 
         /// <inheritdoc />
@@ -158,11 +122,13 @@ namespace FlaxEditor.Surface
         /// <inheritdoc />
         protected override void UpdateRectangles()
         {
-            const float headerSize = Constants.NodeHeaderSize;
+            base.UpdateRectangles();
+
+            const float headerSize = Constants.NodeHeaderHeight;
             const float buttonMargin = Constants.NodeCloseButtonMargin;
             const float buttonSize = Constants.NodeCloseButtonSize;
             _headerRect = new Rectangle(0, 0, Width, headerSize);
-            _closeButtonRect = new Rectangle(Width - buttonSize - buttonMargin, buttonMargin, buttonSize, buttonSize);
+            _closeButtonRect = new Rectangle(Width - buttonSize * 0.75f - buttonMargin, buttonMargin, buttonSize * 0.75f, buttonSize * 0.75f);
             _colorButtonRect = new Rectangle(_closeButtonRect.Left - buttonSize - buttonMargin, buttonMargin, buttonSize, buttonSize);
             _resizeButtonRect = new Rectangle(_closeButtonRect.Left, Height - buttonSize - buttonMargin, buttonSize, buttonSize);
             _renameTextBox.Width = Width;
@@ -217,21 +183,18 @@ namespace FlaxEditor.Surface
             if (Surface.CanEdit)
             {
                 // Close button
-                Render2D.DrawSprite(style.Cross, _closeButtonRect, _closeButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
+                DrawCloseButton(_closeButtonRect, _closeButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
 
                 // Color button
                 Render2D.DrawSprite(style.Settings, _colorButtonRect, _colorButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
 
-                // Check if is resizing
+                // Resize button
                 if (_isResizing)
                 {
-                    // Draw overlay
                     Render2D.FillRectangle(_resizeButtonRect, style.Selection);
                     Render2D.DrawRectangle(_resizeButtonRect, style.SelectionBorder);
                 }
-
-                // Resize button
-                Render2D.DrawSprite(style.Scale, _resizeButtonRect, _resizeButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
+                Render2D.DrawSprite(style.Scale, _resizeButtonRect, _resizeButtonRect.Contains(_mousePosition) ? style.Foreground : style.ForegroundGrey);
             }
 
             // Selection outline
@@ -247,86 +210,26 @@ namespace FlaxEditor.Surface
         /// <inheritdoc />
         protected override Float2 CalculateNodeSize(float width, float height)
         {
-            return Size;
+            // No margins or headers
+            return new Float2(width, height);
         }
 
         /// <inheritdoc />
         public override void OnLostFocus()
         {
-            // Check if was resizing
-            if (_isResizing)
-            {
-                EndResizing();
-            }
-
-            // Check if was renaming
             if (_isRenaming)
             {
                 Rename(_renameTextBox.Text);
                 StopRenaming();
             }
 
-            // Base
             base.OnLostFocus();
-        }
-
-        /// <inheritdoc />
-        public override void OnEndMouseCapture()
-        {
-            // Check if was resizing
-            if (_isResizing)
-            {
-                EndResizing();
-            }
-            else
-            {
-                base.OnEndMouseCapture();
-            }
         }
 
         /// <inheritdoc />
         public override bool ContainsPoint(ref Float2 location, bool precise)
         {
             return _headerRect.Contains(ref location) || _resizeButtonRect.Contains(ref location);
-        }
-
-        /// <inheritdoc />
-        public override bool OnMouseDown(Float2 location, MouseButton button)
-        {
-            if (base.OnMouseDown(location, button))
-                return true;
-
-            // Check if can start resizing
-            if (button == MouseButton.Left && _resizeButtonRect.Contains(ref location) && Surface.CanEdit)
-            {
-                // Start sliding
-                _isResizing = true;
-                _startResizingSize = Size;
-                StartMouseCapture();
-
-                return true;
-            }
-
-            return false;
-        }
-
-        /// <inheritdoc />
-        public override void OnMouseMove(Float2 location)
-        {
-            // Check if is resizing
-            if (_isResizing)
-            {
-                // Update size
-                var size = Float2.Max(location, new Float2(140.0f, _headerRect.Bottom));
-                if (Surface.GridSnappingEnabled)
-                    size = Surface.SnapToGrid(size, true);
-                Size = size;
-            }
-            else
-            {
-                // Base
-                base.OnMouseMove(location);
-            }
         }
 
         /// <inheritdoc />
@@ -394,12 +297,6 @@ namespace FlaxEditor.Surface
         /// <inheritdoc />
         public override bool OnMouseUp(Float2 location, MouseButton button)
         {
-            if (button == MouseButton.Left && _isResizing)
-            {
-                EndResizing();
-                return true;
-            }
-
             if (base.OnMouseUp(location, button))
                 return true;
 

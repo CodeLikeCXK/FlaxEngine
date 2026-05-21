@@ -8,6 +8,8 @@
 #include "Loading/Tasks/LoadAssetTask.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/LogContext.h"
+#include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Physics/Physics.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Scripting/ManagedCLR/MCore.h"
@@ -316,7 +318,7 @@ void Asset::OnDeleteObject()
 
         // Delete file
         if (!IsVirtual())
-            Content::deleteFileSafety(path, id);
+            Content::deleteFileSafety(path, &id);
     }
 #endif
 }
@@ -487,6 +489,8 @@ bool Asset::WaitForLoaded(double timeoutInMilliseconds) const
     const auto loadingTask = (ContentLoadTask*)Platform::AtomicRead(&_loadingTask);
     if (loadingTask == nullptr)
     {
+        if (IsLoaded())
+            return false;
         LOG(Warning, "WaitForLoaded asset \'{0}\' failed. No loading task attached and asset is not loaded.", ToString());
         return true;
     }
@@ -581,7 +585,8 @@ void Asset::startLoading()
 {
     PROFILE_MEM(ContentAssets);
     ASSERT(!IsLoaded());
-    ASSERT(Platform::AtomicRead(&_loadingTask) == 0);
+    auto task = (Task*)Platform::AtomicRead(&_loadingTask);
+    ASSERT(task == nullptr || task->IsFinished() || task->IsCanceled());
     auto loadingTask = createLoadingTask();
     ASSERT(loadingTask != nullptr);
     Platform::AtomicStore(&_loadingTask, (intptr)loadingTask);
@@ -699,6 +704,38 @@ void Asset::onUnload_MainThread()
     for (const auto& e : _references)
         e.Item->OnAssetUnloaded(this, this);
     OnUnloaded(this);
+}
+
+bool Asset::WaitForInitGraphics()
+{
+#define IS_GPU_NOT_READY() (GPUDevice::Instance == nullptr || GPUDevice::Instance->GetState() != GPUDevice::DeviceState::Ready)
+    if (!IsInMainThread() && IS_GPU_NOT_READY())
+    {
+        PROFILE_CPU();
+        ZoneColor(TracyWaitZoneColor);
+        int32 timeout = 1000;
+        while (IS_GPU_NOT_READY() && timeout-- > 0)
+            Platform::Sleep(1);
+        if (IS_GPU_NOT_READY())
+            return true;
+    }
+#undef IS_GPU_NOT_READY
+    return false;
+}
+
+bool Asset::WaitForInitPhysics()
+{
+    if (!IsInMainThread() && !Physics::DefaultScene)
+    {
+        PROFILE_CPU();
+        ZoneColor(TracyWaitZoneColor);
+        int32 timeout = 1000;
+        while (!Physics::DefaultScene && timeout-- > 0)
+            Platform::Sleep(1);
+        if (!Physics::DefaultScene)
+            return true;
+    }
+    return false;
 }
 
 #if USE_EDITOR

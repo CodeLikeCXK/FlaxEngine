@@ -539,11 +539,35 @@ protected:
 			hitInfo = hit.shape ? static_cast<PhysicsColliderActor*>(hit.shape->userData) : nullptr; \
 		}
 
+#if PLATFORM_THREADS_LIMIT <= 1
+
+class DummyCpuDispatcher : public PxCpuDispatcher
+{
+public:
+    void submitTask(PxBaseTask& task) override
+    {
+        // Run directly
+        PROFILE_CPU_NAMED("Physics");
+        task.run();
+        task.release();
+    }
+    uint32_t getWorkerCount() const override
+    {
+        return 1;
+    }
+};
+
+#endif
+
 namespace
 {
     PxFoundation* Foundation = nullptr;
     PxPhysics* PhysX = nullptr;
+#if PLATFORM_THREADS_LIMIT > 1
     PxDefaultCpuDispatcher* CpuDispatcher = nullptr;
+#else
+    DummyCpuDispatcher* CpuDispatcher = nullptr;
+#endif
 #if WITH_PVD
     PxPvd* PVD = nullptr;
 #endif
@@ -1151,6 +1175,8 @@ void ScenePhysX::UpdateVehicles(float dt)
             state.SteerAngle = RadiansToDegrees * perWheel.steerAngle;
             state.RotationAngle = -RadiansToDegrees * drive->mWheelsDynData.getWheelRotationAngle(j);
             state.SuspensionOffset = perWheel.suspJounce;
+            state.LongitudinalSlip = perWheel.longitudinalSlip;
+            state.LateralSlip = perWheel.lateralSlip;
 #if USE_EDITOR
             state.SuspensionTraceStart = P2C(perWheel.suspLineStart) + Origin;
             state.SuspensionTraceEnd = P2C(perWheel.suspLineStart + perWheel.suspLineDir * perWheel.suspLineLength) + Origin;
@@ -1177,8 +1203,11 @@ void ScenePhysX::UpdateVehicles(float dt)
 void ScenePhysX::PreSimulateCloth(int32 i)
 {
     PROFILE_CPU();
+    PROFILE_MEM(PhysicsCloth);
     auto clothPhysX = ClothsList[i];
     auto& clothSettings = Cloths[clothPhysX];
+    if (!clothSettings.Actor)
+        return;
 
     if (clothSettings.Actor->OnPreUpdate())
     {
@@ -1379,6 +1408,7 @@ void ScenePhysX::UpdateCloths(float dt)
     if (!clothSolver || ClothsList.IsEmpty())
         return;
     PROFILE_CPU_NAMED("Physics.Cloth");
+    PROFILE_MEM(PhysicsCloth);
 
     {
         PROFILE_CPU_NAMED("Pre");
@@ -1736,7 +1766,11 @@ void PhysicsBackend::Shutdown()
 #if WITH_PVD
     RELEASE_PHYSX(PVD);
 #endif
+#if PLATFORM_THREADS_LIMIT > 1
     RELEASE_PHYSX(CpuDispatcher);
+#else
+    SAFE_DELETE(CpuDispatcher);
+#endif
     RELEASE_PHYSX(Foundation);
     SceneOrigins.Clear();
 }
@@ -1796,8 +1830,13 @@ void* PhysicsBackend::CreateScene(const PhysicsSettings& settings)
     {
         if (CpuDispatcher == nullptr)
         {
+#if PLATFORM_THREADS_LIMIT > 1
             uint32 threads = Math::Clamp<uint32>(Platform::GetCPUInfo().ProcessorCoreCount - 1, 1, 8);
             CpuDispatcher = PxDefaultCpuDispatcherCreate(threads);
+            CHECK_INIT(CpuDispatcher, "PxDefaultCpuDispatcherCreate failed!");
+#else
+            CpuDispatcher = New<DummyCpuDispatcher>();
+#endif
             CHECK_INIT(CpuDispatcher, "PxDefaultCpuDispatcherCreate failed!");
         }
         sceneDesc.cpuDispatcher = CpuDispatcher;
@@ -1940,6 +1979,7 @@ void PhysicsBackend::EndSimulateScene(void* scene)
         PxActor** activeActors = scenePhysX->Scene->getActiveActors(activeActorsCount);
 
         // Update changed transformations
+#if PLATFORM_THREADS_LIMIT > 1
         if (activeActorsCount > 50 && JobSystem::GetThreadsCount() > 1)
         {
             // Run in async via job system
@@ -1949,6 +1989,7 @@ void PhysicsBackend::EndSimulateScene(void* scene)
             JobSystem::Execute(FlushActiveTransforms, JobSystem::GetThreadsCount());
         }
         else
+#endif
         {
             for (uint32 i = 0; i < activeActorsCount; i++)
             {
@@ -2450,7 +2491,7 @@ void PhysicsBackend::SetRigidActorPose(void* actor, const Vector3& position, con
     if (kinematic)
     {
         auto actorPhysX = (PxRigidDynamic*)actor;
-        if (actorPhysX->getActorFlags() & PxActorFlag::eDISABLE_SIMULATION)
+        if (actorPhysX->getActorFlags() & PxActorFlag::eDISABLE_SIMULATION || !(actorPhysX->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC))
         {
             // Ensures the disabled kinematic actor ends up in the correct pose after enabling simulation
             actorPhysX->setGlobalPose(trans, wakeUp);
@@ -2649,10 +2690,13 @@ void* PhysicsBackend::CreateShape(PhysicsColliderActor* collider, const Collisio
     PxGeometryHolder geometryPhysX;
     GetShapeGeometry(geometry, geometryPhysX);
     PxShape* shapePhysX = PhysX->createShape(geometryPhysX.any(), materialsPhysX.Get(), materialsPhysX.Count(), true, shapeFlags);
-    shapePhysX->userData = collider;
+    if (shapePhysX)
+    {
+        shapePhysX->userData = collider;
 #if PHYSX_DEBUG_NAMING
-    shapePhysX->setName("Shape");
+        shapePhysX->setName("Shape");
 #endif
+    }
     return shapePhysX;
 }
 
@@ -2784,6 +2828,69 @@ float PhysicsBackend::ComputeShapeSqrDistanceToPoint(void* shape, const Vector3&
 {
     auto shapePhysX = (PxShape*)shape;
     const PxTransform trans(C2P(position), C2P(orientation));
+
+    // Special case for heightfield collider (not implemented in PhysX)
+    if (shapePhysX->getGeometryType() == PxGeometryType::eHEIGHTFIELD)
+    {
+        // Do a bunch of raycasts in all directions to find the closest point on the heightfield
+        PxVec3 origin = C2P(point);
+        Array<PxVec3> unitDirections;
+        constexpr int32 resolution = 32;
+        unitDirections.EnsureCapacity((resolution + 1) * (resolution + 1));
+        for (int32 i = 0; i <= resolution; i++)
+        {
+            float phi = PI * (float)i / resolution;
+            float sinPhi = Math::Sin(phi);
+            float cosPhi = Math::Cos(phi);
+            for (int32 j = 0; j <= resolution; j++)
+            {
+                float theta = 2.0f * PI * (float)j / resolution;
+                float cosTheta = Math::Cos(theta);
+                float sinTheta = Math::Sin(theta);
+
+                PxVec3 v;
+                v.x = cosTheta * sinPhi;
+                v.y = cosPhi;
+                v.z = sinTheta * sinPhi;
+            
+                // All generated vectors are unit vectors (length 1)
+                unitDirections.Add(v);
+            }
+        }
+
+        PxReal maxDistance = PX_MAX_REAL; // Search indefinitely
+        PxQueryFilterData filterData;
+        filterData.data.word0 = (PxU32)shapePhysX->getSimulationFilterData().word0;
+        PxHitFlags hitFlags = PxHitFlag::ePOSITION | PxHitFlag::eMESH_BOTH_SIDES; // Both sides added for if it is underneath the height field
+        PxRaycastBuffer buffer;
+        auto scene = shapePhysX->getActor()->getScene();
+
+        PxReal closestDistance = maxDistance;
+        PxVec3 tempClosestPoint;
+        for (PxVec3& unitDir : unitDirections)
+        {
+            bool hitResult = scene->raycast(origin, unitDir, maxDistance, buffer, hitFlags, filterData);
+            if (hitResult)
+            {
+                auto& hit = buffer.getAnyHit(0);
+                if (hit.distance < closestDistance && hit.distance > 0.0f)
+                {
+                    tempClosestPoint = hit.position;
+                    closestDistance = hit.distance;
+                }
+            }
+        }
+        
+        if (closestDistance < maxDistance)
+        {
+            *closestPoint = P2C(tempClosestPoint);
+            return closestDistance * closestDistance; // Result is squared distance
+        }
+
+        return -1.0f;
+    }
+
+    // Default point distance for other collider queries
 #if USE_LARGE_WORLDS
     PxVec3 closestPointPx;
     float result = PxGeometryQuery::pointDistance(C2P(point), shapePhysX->getGeometry(), trans, &closestPointPx);
@@ -3931,7 +4038,7 @@ void PhysicsBackend::RemoveVehicle(void* scene, WheeledVehicle* actor)
 void* PhysicsBackend::CreateCloth(const PhysicsClothDesc& desc)
 {
     PROFILE_CPU();
-    PROFILE_MEM(Physics);
+    PROFILE_MEM(PhysicsCloth);
 #if USE_CLOTH_SANITY_CHECKS
     {
         // Sanity check

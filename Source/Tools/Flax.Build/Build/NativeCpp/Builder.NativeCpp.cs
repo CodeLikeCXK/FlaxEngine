@@ -429,6 +429,7 @@ namespace Flax.Build
                 var dependencyModule = buildData.Rules.GetModule(moduleName);
                 if (dependencyModule != null && buildData.Modules.TryGetValue(dependencyModule, out var dependencyOptions))
                 {
+                    moduleOptions.LinkEnv.CustomArgs.AddRange(dependencyOptions.LinkEnv.CustomArgs);
                     moduleOptions.LinkEnv.InputFiles.AddRange(dependencyOptions.OutputFiles);
                     moduleOptions.DependencyFiles.AddRange(dependencyOptions.DependencyFiles);
                     moduleOptions.OptionalDependencyFiles.AddRange(dependencyOptions.OptionalDependencyFiles);
@@ -445,6 +446,7 @@ namespace Flax.Build
                 var dependencyModule = buildData.Rules.GetModule(moduleName);
                 if (dependencyModule != null && buildData.Modules.TryGetValue(dependencyModule, out var dependencyOptions))
                 {
+                    moduleOptions.LinkEnv.CustomArgs.AddRange(dependencyOptions.LinkEnv.CustomArgs);
                     moduleOptions.LinkEnv.InputFiles.AddRange(dependencyOptions.OutputFiles);
                     moduleOptions.DependencyFiles.AddRange(dependencyOptions.DependencyFiles);
                     moduleOptions.OptionalDependencyFiles.AddRange(dependencyOptions.OptionalDependencyFiles);
@@ -491,7 +493,7 @@ namespace Flax.Build
                 var cppFiles = new List<string>(moduleOptions.SourceFiles.Count / 2);
                 for (int i = 0; i < moduleOptions.SourceFiles.Count; i++)
                 {
-                    if (moduleOptions.SourceFiles[i].EndsWith(".cpp", StringComparison.OrdinalIgnoreCase))
+                    if (moduleOptions.SourceFiles[i].EndsWith(".cpp", StringComparison.OrdinalIgnoreCase) || moduleOptions.SourceFiles[i].EndsWith(".c", StringComparison.OrdinalIgnoreCase))
                         cppFiles.Add(moduleOptions.SourceFiles[i]);
                 }
 
@@ -940,6 +942,7 @@ namespace Flax.Build
                         var moduleOptions = BuildModule(buildData, module);
 
                         // Merge module into target environment
+                        buildData.TargetOptions.LinkEnv.CustomArgs.AddRange(moduleOptions.LinkEnv.CustomArgs);
                         buildData.TargetOptions.LinkEnv.InputFiles.AddRange(moduleOptions.OutputFiles);
                         buildData.TargetOptions.DependencyFiles.AddRange(moduleOptions.DependencyFiles);
                         buildData.TargetOptions.OptionalDependencyFiles.AddRange(moduleOptions.OptionalDependencyFiles);
@@ -1057,27 +1060,7 @@ namespace Flax.Build
             // Deploy files
             if (!buildData.Target.IsPreBuilt)
             {
-                using (new ProfileEventScope("DeployFiles"))
-                {
-                    foreach (var srcFile in targetBuildOptions.OptionalDependencyFiles.Where(File.Exists).Union(targetBuildOptions.DependencyFiles))
-                    {
-                        var dstFile = Path.Combine(outputPath, Path.GetFileName(srcFile));
-                        graph.AddCopyFile(dstFile, srcFile);
-                    }
-
-                    if (targetBuildOptions.NugetPackageReferences.Any())
-                    {
-                        var nugetPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
-                        foreach (var reference in targetBuildOptions.NugetPackageReferences)
-                        {
-                            var path = Path.Combine(nugetPath, reference.Name, reference.Version, "lib", reference.Framework, $"{reference.Name}.dll");
-                            if (!File.Exists(path))
-                                Utilities.RestoreNugetPackages(graph, target);
-                            var dstFile = Path.Combine(outputPath, Path.GetFileName(path));
-                            graph.AddCopyFile(dstFile, path);
-                        }
-                    }
-                }
+                DeployFiles(graph, target, targetBuildOptions, outputPath);
             }
 
             using (new ProfileEventScope("PostBuild"))
@@ -1270,27 +1253,7 @@ namespace Flax.Build
             // Deploy files
             if (!buildData.Target.IsPreBuilt)
             {
-                using (new ProfileEventScope("DeployFiles"))
-                {
-                    foreach (var srcFile in targetBuildOptions.OptionalDependencyFiles.Where(File.Exists).Union(targetBuildOptions.DependencyFiles))
-                    {
-                        var dstFile = Path.Combine(outputPath, Path.GetFileName(srcFile));
-                        graph.AddCopyFile(dstFile, srcFile);
-                    }
-
-                    if (targetBuildOptions.NugetPackageReferences.Any())
-                    {
-                        var nugetPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
-                        foreach (var reference in targetBuildOptions.NugetPackageReferences)
-                        {
-                            var path = Path.Combine(nugetPath, reference.Name, reference.Version, "lib", reference.Framework, $"{reference.Name}.dll");
-                            if (!File.Exists(path))
-                                Utilities.RestoreNugetPackages(graph, target);
-                            var dstFile = Path.Combine(outputPath, Path.GetFileName(path));
-                            graph.AddCopyFile(dstFile, path);
-                        }
-                    }
-                }
+                DeployFiles(graph, target, targetBuildOptions, outputPath);
             }
 
             using (new ProfileEventScope("PostBuild"))

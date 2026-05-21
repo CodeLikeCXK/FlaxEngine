@@ -42,21 +42,14 @@ namespace Flax.Build
         }
 
         /// <summary>
-        /// Restores a targets nuget packages.
+        /// Gets the NuGet packages cache folder path.
         /// </summary>
-        /// <param name="graph">The task graph.</param>
-        /// <param name="target">The target.</param>
-        /// <param name="dotNetPath">The dotnet path.</param>
-        public static void RestoreNugetPackages(Graph.TaskGraph graph, Target target)
+        /// <returns>The path.</returns>
+        public static string GetNugetPackagesPath()
         {
-            var dotNetPath = GetDotNetPath();
-            var task = graph.Add<Graph.Task>();
-            task.WorkingDirectory = target.FolderPath;
-            task.InfoMessage = $"Restoring Nuget Packages for {target.Name}";
-            task.CommandPath = dotNetPath;
-            task.CommandArguments = $"restore";
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
         }
-        
+
         /// <summary>
         /// Gets the hash code for the string (the same for all platforms). Matches Engine algorithm for string hashing.
         /// </summary>
@@ -423,6 +416,14 @@ namespace Flax.Build
             }
         }
 
+        private static void StdLogError(object sender, DataReceivedEventArgs e)
+        {
+            if (e.Data != null)
+            {
+                Log.Error(e.Data);
+            }
+        }
+
         private static void StdLogVerbose(object sender, DataReceivedEventArgs e)
         {
             if (e.Data != null)
@@ -513,7 +514,7 @@ namespace Flax.Build
                 if (options.HasFlag(RunOptions.ConsoleLogOutput))
                 {
                     proc.OutputDataReceived += StdLogInfo;
-                    proc.ErrorDataReceived += StdLogInfo;
+                    proc.ErrorDataReceived += StdLogError;
                 }
                 else
                 {
@@ -594,8 +595,9 @@ namespace Flax.Build
         /// </summary>
         /// <param name="filename">The executable file path.</param>
         /// <param name="args">The custom arguments.</param>
+        /// <param name="workspace">The custom folder to run program in it.</param>
         /// <returns>Returned process output.</returns>
-        public static string ReadProcessOutput(string filename, string args = null)
+        public static string ReadProcessOutput(string filename, string args = null, string workspace = null)
         {
             Process p = new Process
             {
@@ -606,6 +608,7 @@ namespace Flax.Build
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
+                    WorkingDirectory = workspace,
                 }
             };
             p.Start();

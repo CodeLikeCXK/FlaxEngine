@@ -27,8 +27,6 @@ namespace
 MaterialValue* MaterialGenerator::sampleTextureRaw(Node* caller, Value& value, Box* box, SerializedMaterialParam* texture)
 {
     ASSERT(texture && box);
-
-    // Cache data
     const auto parent = box->GetParent<ShaderGraphNode<>>();
     const bool isCubemap = texture->Type == MaterialParameterType::CubeTexture;
     const bool isArray = texture->Type == MaterialParameterType::GPUTextureArray;
@@ -101,7 +99,13 @@ MaterialValue* MaterialGenerator::sampleTextureRaw(Node* caller, Value& value, B
         const Char* sampler = TEXT("SamplerLinearWrap");
 
         // Sample texture
-        if (isNormalMap)
+        if (texture->AsInteger == (int32)MaterialSceneTextures::SceneDepth)
+        {
+            // Sample depth buffer
+            String sampledValue = String::Format(TEXT("SAMPLE_RT_DEPTH({0}, {1})"), texture->ShaderName, uv);
+            valueBox->Cache = writeLocal(VariantType::Float, sampledValue, parent);
+        }
+        else if (isNormalMap)
         {
             const Char* format = canUseSample ? TEXT("{0}.Sample({1}, {2}).xyz") : TEXT("{0}.SampleLevel({1}, {2}, {3}).xyz");
 
@@ -534,7 +538,7 @@ void MaterialGenerator::ProcessGroupTextures(Box* box, Node* node, Value& value)
     }
     // Sample Texture
     case 9:
-    // Procedural Texture Sample
+    // Procedural Sample Texture
     case 17:
     {
         // Get input boxes
@@ -585,7 +589,7 @@ void MaterialGenerator::ProcessGroupTextures(Box* box, Node* node, Value& value)
         const auto offset = useOffset ? eatBox(offsetBox->GetParent<Node>(), offsetBox->FirstConnection()) : Value::Zero;
         const Char* samplerName;
         const int32 samplerIndex = node->Values[0].AsInt;
-        if (samplerIndex == TextureGroup)
+        if (samplerIndex == TextureGroup && node->Values.Count() > 2)
         {
             auto& textureGroupSampler = findOrAddTextureGroupSampler(node->Values[2].AsInt);
             samplerName = *textureGroupSampler.ShaderName;
@@ -739,7 +743,7 @@ void MaterialGenerator::ProcessGroupTextures(Box* box, Node* node, Value& value)
         const int32 samplerIndex = node->Values.Count() >= 4 ? node->Values[3].AsInt : LinearWrap;
         if (samplerIndex == TextureGroup)
         {
-            auto& textureGroupSampler = findOrAddTextureGroupSampler(node->Values[3].AsInt);
+            auto& textureGroupSampler = findOrAddTextureGroupSampler(node->Values[5].AsInt);
             samplerName = *textureGroupSampler.ShaderName;
         }
         else if (samplerIndex >= 0 && samplerIndex < ARRAY_COUNT(SamplerNames))
@@ -828,7 +832,7 @@ void MaterialGenerator::ProcessGroupTextures(Box* box, Node* node, Value& value)
         const int32 samplerIndex = node->Values[3].AsInt;
         if (samplerIndex == TextureGroup)
         {
-            auto& textureGroupSampler = findOrAddTextureGroupSampler(node->Values[3].AsInt);
+            auto& textureGroupSampler = findOrAddTextureGroupSampler(node->Values[5].AsInt);
             samplerName = *textureGroupSampler.ShaderName;
         }
         else if (samplerIndex >= 0 && samplerIndex < ARRAY_COUNT(SamplerNames))

@@ -347,6 +347,14 @@ namespace FlaxEditor.Options
         [EditorDisplay("Viewport"), EditorOrder(1550)]
         public InputBinding Down = new InputBinding(KeyboardKeys.Q);
 
+        [DefaultValue(typeof(InputBinding), "C")]
+        [EditorDisplay("Viewport"), EditorOrder(1551)]
+        public InputBinding ZoomIn = new InputBinding(KeyboardKeys.C);
+
+        [DefaultValue(typeof(InputBinding), "Z")]
+        [EditorDisplay("Viewport"), EditorOrder(1552)]
+        public InputBinding ZoomOut = new InputBinding(KeyboardKeys.Z);
+
         [DefaultValue(typeof(InputBinding), "None")]
         [EditorDisplay("Viewport", "Toggle Camera Rotation"), EditorOrder(1560)]
         public InputBinding CameraToggleRotation = new InputBinding(KeyboardKeys.None);
@@ -386,6 +394,14 @@ namespace FlaxEditor.Options
         [DefaultValue(typeof(InputBinding), "NumpadDecimal")]
         [EditorDisplay("Viewport"), EditorOrder(1760)]
         public InputBinding ToggleOrthographic = new InputBinding(KeyboardKeys.NumpadDecimal);
+
+        [DefaultValue(typeof(InputBinding), "G")]
+        [EditorDisplay("Viewport"), EditorOrder(1770)]
+        public InputBinding ToggleGameView = new InputBinding(KeyboardKeys.G);
+
+        [DefaultValue(typeof(InputBinding), "P")]
+        [EditorDisplay("Viewport"), EditorOrder(1770)]
+        public InputBinding ToggleNavMeshVisibility = new InputBinding(KeyboardKeys.P);
 
         #endregion
 
@@ -571,6 +587,10 @@ namespace FlaxEditor.Options
         [EditorDisplay("View Flags"), EditorOrder(3260)]
         public InputBinding DebugDraw = new InputBinding(KeyboardKeys.Alpha4, KeyboardKeys.Control, KeyboardKeys.Shift);
 
+        [DefaultValue(typeof(InputBinding), "None")]
+        [EditorDisplay("View Flags"), EditorOrder(3270)]
+        public InputBinding Particles = new InputBinding(KeyboardKeys.None);
+
         #endregion
 
         #region Interface
@@ -697,6 +717,10 @@ namespace FlaxEditor.Options
         [DefaultValue(typeof(InputBinding), "Alt+A")]
         [EditorDisplay("Node Editors"), EditorOrder(4580)]
         public InputBinding NodesDistributeVertical = new InputBinding(KeyboardKeys.A, KeyboardKeys.Alt);
+
+        [DefaultValue(typeof(InputBinding), "Shift+F")]
+        [EditorDisplay("Node Editors"), EditorOrder(4590)]
+        public InputBinding FocusSelectedNodes = new InputBinding(KeyboardKeys.F, KeyboardKeys.Shift);
 
         #endregion
     }

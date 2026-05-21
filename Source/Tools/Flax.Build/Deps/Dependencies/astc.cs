@@ -1,6 +1,5 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
-using System.Collections.Generic;
 using System.IO;
 using Flax.Build;
 
@@ -35,6 +34,30 @@ namespace Flax.Deps.Dependencies
         }
 
         /// <inheritdoc />
+        public override TargetArchitecture[] Architectures
+        {
+            get
+            {
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Windows:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.Mac:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                default: return new TargetArchitecture[0];
+                }
+            }
+        }
+
+        /// <inheritdoc />
         public override void Build(BuildOptions options)
         {
             var root = options.IntermediateFolder;
@@ -43,16 +66,19 @@ namespace Flax.Deps.Dependencies
             var commit = "aeece2f609db959d1c5e43e4f00bd177ea130575"; // 4.6.1
             CloneGitRepo(root, "https://github.com/ARM-software/astc-encoder.git", commit);
 
+            // Fix compilation on macOS
+            Utilities.ReplaceInFile(Path.Combine(root, "Source/cmake_core.cmake"), "-ffp-model=precise", "");
+
             foreach (var platform in options.Platforms)
             {
-                BuildStarted(platform);
-                switch (platform)
+                foreach (var architecture in options.Architectures)
                 {
-                case TargetPlatform.Windows:
-
-                    foreach (var architecture in new []{ TargetArchitecture.x64, TargetArchitecture.ARM64 })
+                    BuildStarted(platform, architecture);
+                    switch (platform)
                     {
-                        string buildDir = Path.Combine(root, "build-" + architecture.ToString());
+                    case TargetPlatform.Windows:
+                    {
+                        string buildDir = Path.Combine(root, "build-" + architecture);
                         var isa = architecture == TargetArchitecture.ARM64 ? "-DASTCENC_ISA_NEON=ON" : "-DASTCENC_ISA_SSE2=ON";
                         var lib = architecture == TargetArchitecture.ARM64 ? "astcenc-neon-static.lib" : "astcenc-sse2-static.lib";
                         SetupDirectory(buildDir, true);
@@ -60,21 +86,21 @@ namespace Flax.Deps.Dependencies
                         BuildCmake(buildDir);
                         var depsFolder = GetThirdPartyFolder(options, platform, architecture);
                         Utilities.FileCopy(Path.Combine(buildDir, "Source/Release", lib), Path.Combine(depsFolder, "astcenc.lib"));
+                        break;
                     }
-                    break;
-                case TargetPlatform.Mac:
-                    foreach (var architecture in new []{ TargetArchitecture.x64, TargetArchitecture.ARM64 })
+                    case TargetPlatform.Mac:
                     {
-                        string buildDir = Path.Combine(root, "build-" + architecture.ToString());
+                        string buildDir = Path.Combine(root, "build-" + architecture);
                         var isa = architecture == TargetArchitecture.ARM64 ? "-DASTCENC_ISA_NEON=ON" : "-DASTCENC_ISA_SSE2=ON";
                         var lib = architecture == TargetArchitecture.ARM64 ? "libastcenc-neon-static.a" : "libastcenc-sse2-static.a";
                         SetupDirectory(buildDir, true);
-                        RunCmake(buildDir, platform, architecture, ".. -DCMAKE_BUILD_TYPE=Release -DASTCENC_UNIVERSAL_BUILD=OFF -DASTCENC_UNIVERSAL_BINARY=OFF " + isa);
+                        RunCmake(buildDir, platform, architecture, ".. -DCMAKE_BUILD_TYPE=Release -DASTCENC_UNIVERSAL_BUILD=OFF -DASTCENC_UNIVERSAL_BINARY=OFF -DASTCENC_INVARIANCE=OFF " + isa);
                         BuildCmake(buildDir);
                         var depsFolder = GetThirdPartyFolder(options, platform, architecture);
                         Utilities.FileCopy(Path.Combine(buildDir, "Source", lib), Path.Combine(depsFolder, "libastcenc.a"));
+                        break;
                     }
-                    break;
+                    }
                 }
             }
 
