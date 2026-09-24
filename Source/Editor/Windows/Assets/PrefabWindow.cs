@@ -366,7 +366,7 @@ namespace FlaxEditor.Windows.Assets
             _viewport.Prefab = null;
             _undo?.Clear(); // TODO: maybe don't clear undo?
 
-            Close();
+            Close(ClosingReason.ScriptsReload);
         }
 
         private void OnUndoEvent(IUndoAction action)
@@ -536,7 +536,7 @@ namespace FlaxEditor.Windows.Assets
             }
 
             // Auto fit
-            if (_focusCamera && _viewport.Task.FrameCount > 1)
+            if (_focusCamera && _viewport.Task.FrameCount > 1 && _viewport.HasContentLoaded)
             {
                 _focusCamera = false;
                 Editor.GetActorEditorSphere(_viewport.Instance, out BoundingSphere bounds);

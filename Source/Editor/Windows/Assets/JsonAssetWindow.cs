@@ -148,7 +148,7 @@ namespace FlaxEditor.Windows.Assets
         protected override void OnScriptsReloadBegin()
         {
             base.OnScriptsReloadBegin();
-            Close();
+            Close(ClosingReason.ScriptsReload);
         }
 
         /// <inheritdoc />
@@ -261,6 +261,15 @@ namespace FlaxEditor.Windows.Assets
             }
 
             base.OnAssetLoaded();
+        }
+
+        /// <inheritdoc />
+        protected override void DiscardChanges()
+        {
+            Asset?.ClearInstance();
+            _object = null;
+
+            base.DiscardChanges();
         }
 
         private void OpenOptionsContextMenu()
